@@ -180,7 +180,7 @@ static int mk_baseline_validate_cpus(const struct mk_instance *instance)
 			return -ENODEV;
 		}
 
-		if (logical_cpu == 0 || phys_cpu_id == 0) {
+		if (logical_cpu == 0 || phys_cpu_id == 0) { // EO -> le CPU 0 c'est le boot CPU
 			pr_warn("Baseline includes boot CPU (phys %u, logical %d) - "
 				"this may cause system instability\n",
 				phys_cpu_id, logical_cpu);
