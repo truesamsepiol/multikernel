@@ -307,7 +307,7 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_call_function_single)
 	trace_call_function_single_exit(CALL_FUNCTION_SINGLE_VECTOR);
 }
 
-#ifdef CONFIG_MULTIKERNEL
+#ifdef CONFIG_MULTIKERNEL // EO -> gestionnaire du vecteur MUTTIKERNEL_VECTOR
 void generic_multikernel_interrupt(void);
 
 DEFINE_IDTENTRY_SYSVEC(sysvec_multikernel)

@@ -925,7 +925,7 @@ static void mk_shutdown_work_fn(struct work_struct *work)
 	stop_this_cpu(NULL);
 }
 
-static void mk_system_msg_handler(u32 msg_type, u32 subtype,
+static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
 				  void *payload, u32 payload_len, void *ctx)
 {
 	if (msg_type != MK_MSG_SYSTEM)
@@ -958,6 +958,28 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype,
 			return;
 		mk_msg_pending_complete(MK_MSG_SYSTEM, MK_SYS_SHUTDOWN,
 					ack->resource_id, ack->result);
+		break;
+	}
+	//EO -> n
+	case MK_SYS_TEST_FINISH : {
+		/*struct mk_shutdown_payload *req = payload;
+		struct mk_shutdown_work *sw;
+
+		if (payload_len < sizeof(*req))
+			return;
+
+		pr_emerg("Shutdown requested by instance %d\n", req->sender_instance_id);
+
+		sw = kmalloc(sizeof(*sw), GFP_ATOMIC);
+		if (!sw)
+			return;
+
+		INIT_WORK(&sw->work, mk_shutdown_work_fn);
+		sw->flags = req->flags;
+		sw->sender_instance_id = req->sender_instance_id;
+		schedule_work(&sw->work);
+		*/
+		pr_info("Capture du message du Test Kernel");
 		break;
 	}
 	default:
@@ -1005,6 +1027,37 @@ int multikernel_halt_by_id(int mk_id)
 	}
 
 	mk_instance_put(instance);
+	return ret;
+}
+
+//EO -> 4
+int multikernel_test_kernel_send_message(int status, int seed)
+{
+	struct mk_shutdown_payload payload;
+	struct mk_pending_msg *pending;
+	int ret;
+
+	payload.flags = MK_TEST_FINISH;
+	payload.sender_instance_id = root_instance->id;
+
+ 	int host_id = 0;
+	pending = mk_msg_pending_add(MK_MSG_SYSTEM, MK_SYS_TEST_FINISH, host_id); 
+	if (!pending) {
+		return -ENOMEM;
+	}
+
+	ret = mk_send_message(host_id, MK_MSG_SYSTEM, MK_SYS_TEST_FINISH,
+			      &payload, sizeof(payload));
+	if (ret < 0) {
+		mk_msg_pending_wait(pending, 0);
+		return ret;
+	}
+
+	ret = mk_msg_pending_wait(pending, 30000);
+	if (ret == 0) {
+		pr_info("core multikernel_test_kernel_send : Test Kernel send Host Kernel message\n");
+	}
+
 	return ret;
 }
 

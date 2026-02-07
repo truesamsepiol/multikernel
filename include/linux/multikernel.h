@@ -85,6 +85,8 @@ void multikernel_unregister_handler(struct mk_ipi_handler *handler);
  * Returns 0 on success, negative error code on failure
  */
 int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, unsigned long type);
+//EO -> 6
+int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size, unsigned long type);
 
 void generic_multikernel_interrupt(void);
 
@@ -122,6 +124,8 @@ void generic_multikernel_interrupt(void);
 #define MK_SYS_HEARTBEAT    (MK_MSG_SYSTEM + 1)
 #define MK_SYS_SHUTDOWN     (MK_MSG_SYSTEM + 2)
 #define MK_SYS_SHUTDOWN_ACK (MK_MSG_SYSTEM + 3)
+//EO -> 4 est une operation
+#define MK_SYS_TEST_FINISH  (MK_MSG_SYSTEM + 4)
 
 /**
  * Core message structure
@@ -210,6 +214,8 @@ struct mk_shutdown_payload {
 
 #define MK_SHUTDOWN_GRACEFUL  0x01
 #define MK_SHUTDOWN_IMMEDIATE 0x02
+//EO -> 4 est un flag
+#define MK_TEST_FINISH        0x03
 
 /**
  * Message handler callback type
@@ -673,6 +679,8 @@ int mk_instance_set_kexec_active(int mk_id);
 #ifdef CONFIG_MULTIKERNEL
 bool multikernel_allow_emergency_restart(void);
 int multikernel_halt_by_id(int mk_id);
+//EO -> 4
+int multikernel_test_kernel_send_message(int status, int seed);
 #else
 static inline bool multikernel_allow_emergency_restart(void)
 {

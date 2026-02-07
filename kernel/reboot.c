@@ -725,6 +725,7 @@ struct multikernel_boot_args {
 // EO -> 3
 struct my_multikernel_boot_args {
         int status;
+	int seed;
 };
 
 /*
@@ -826,9 +827,7 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	case LINUX_REBOOT_CMD_MULTIKERNEL_TEST_KERNEL_FINISH :
 		if (copy_from_user(&my_boot_args, arg, sizeof(my_boot_args)))
 			return -EFAULT;
-		pr_info("EO -> opendDcDiag response : %d\n", my_boot_args.status);
-		// mk_send_message(0, MK_MSG_SYSTEM, MK_SYS_TEST_FINISH, &paylaod, sizeof(payload);
-		ret = 0;
+		ret = multikernel_test_kernel_send_message(my_boot_args.status, my_boot_args.seed);
 		break;
 #endif
 

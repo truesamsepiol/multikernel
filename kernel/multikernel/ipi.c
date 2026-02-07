@@ -173,6 +173,68 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 	return 0;
 }
 
+//EO -> 6
+int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size, unsigned long type)
+{
+	struct mk_ipi_data *slot;
+	struct mk_instance *instance = mk_instance_find(instance_id);
+	unsigned int head, next_head, tail;
+	int cpu;
+
+	if (!instance)
+		return -EINVAL;
+	if (data_size > MK_MAX_DATA_SIZE) {
+		mk_instance_put(instance);
+		return -EINVAL;
+	}
+
+
+	if (!instance->ipi_data) {
+		pr_debug("Multikernel IPI buffer not available for instance %d\n", instance_id);
+		mk_instance_put(instance);
+		return -ENODEV;
+	}
+
+	pr_info("instance->ipi_data exist");
+
+	do {
+		head = atomic_read(&instance->ipi_data->ring.head);
+		next_head = (head + 1) % MK_IPI_RING_SIZE;
+		tail = atomic_read(&instance->ipi_data->ring.tail);
+		pr_info("head=%u, tail=%u", head, tail);
+
+		if (next_head == tail) {
+			pr_warn("IPI ring buffer full for instance %d (head=%u, tail=%u)\n",
+				instance_id, head, tail);
+			mk_instance_put(instance);
+			return -ENOSPC;
+		}
+
+	} while (atomic_cmpxchg(&instance->ipi_data->ring.head, head, next_head) != head);
+
+
+	slot = &instance->ipi_data->ring.entries[head];
+
+	slot->sender_cpu = arch_cpu_physical_id(smp_processor_id());
+	slot->type = type;
+	slot->data_size = data_size;
+
+
+	if (data && data_size > 0)
+		memcpy(slot->buffer, data, data_size);
+
+	smp_wmb();
+
+	cpu = find_first_bit(instance->cpus, NR_CPUS);
+
+	apic_icr_write(APIC_DM_FIXED | APIC_DEST_PHYSICAL | MULTIKERNEL_VECTOR,
+		       cpu); // EO -> generic_multikernel_interrupt est la fonction appelé par le vecteur d'interuption mutltikernel
+
+	mk_instance_put(instance);
+	return 0;
+
+}
+
 /**
  * multikernel_interrupt_handler - Handle the multikernel IPI
  *
@@ -216,7 +278,9 @@ static void multikernel_interrupt_handler(void)
 			continue;
 		}
 
-		pr_debug("Multikernel IPI received on CPU %d from CPU %d (slot %u, type=%u, size=%zu)\n",
+		//pr_debug("Multikernel IPI received on CPU %d from CPU %d (slot %u, type=%u, size=%zu)\n",
+			 //current_cpu, slot->sender_cpu, tail, slot->type, slot->data_size);
+		pr_info("Multikernel IPI received on CPU %d from CPU %d (slot %u, type=%u, size=%zu)\n",
 			 current_cpu, slot->sender_cpu, tail, slot->type, slot->data_size);
 
 		/* Dispatch to registered handlers */
@@ -224,7 +288,7 @@ static void multikernel_interrupt_handler(void)
 		for (handler = mk_handlers; handler; handler = handler->next) {
 			if (handler->ipi_type == slot->type) {
 				handler->saved_data = slot;
-				irq_work_queue(&handler->work);
+				irq_work_queue(&handler->work); // EO -> 8
 			}
 		}
 		raw_spin_unlock(&mk_handlers_lock);
@@ -254,7 +318,7 @@ static void multikernel_interrupt_handler(void)
  *
  * This is the function that gets called by the IPI vector handler.
  */
-void generic_multikernel_interrupt(void)
+void generic_multikernel_interrupt(void) // EO -> 7
 {
-	multikernel_interrupt_handler();
+	multikernel_interrupt_handler(); 
 }
