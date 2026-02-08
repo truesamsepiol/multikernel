@@ -214,6 +214,14 @@ struct mk_shutdown_payload {
 	int sender_instance_id;
 };
 
+// EO -> 4
+struct mk_test_finish_payload {
+	u32 flags;
+	int sender_instance_id;
+	int status;
+	int seed;
+};
+
 #define MK_SHUTDOWN_GRACEFUL  0x01
 #define MK_SHUTDOWN_IMMEDIATE 0x02
 //EO -> 4 est un flag

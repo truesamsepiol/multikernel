@@ -979,13 +979,13 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
 	}
 	//EO -> 10
 	case MK_SYS_TEST_FINISH : {
-		struct mk_shutdown_payload *req = payload;
+		struct mk_test_finish_payload *req = payload;
 		struct mk_shutdown_work *sw;
 
 		if (payload_len < sizeof(*req))
 			return;
 
-		pr_info("Finish requested by instance %d\n", req->sender_instance_id);//EO-> status,seed
+		pr_info("Finish requested by instance %d with : status %d, seed %d\n", req->sender_instance_id, req->status, req->seed);
 
 		sw = kmalloc(sizeof(*sw), GFP_ATOMIC);
 		if (!sw)
@@ -1058,12 +1058,14 @@ int multikernel_halt_by_id(int mk_id)
 //EO -> 4
 int multikernel_test_kernel_send_message(int status, int seed)
 {
-	struct mk_shutdown_payload payload;
+	struct mk_test_finish_payload payload;
 	struct mk_pending_msg *pending;
 	int ret;
 
 	payload.flags = MK_TEST_FINISH;
 	payload.sender_instance_id = root_instance->id;
+	payload.status = status;
+	payload.seed   = seed;
 
  	int host_id = 0;
 	pending = mk_msg_pending_add(MK_MSG_SYSTEM, MK_SYS_TEST_FINISH, host_id); 
