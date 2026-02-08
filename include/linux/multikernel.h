@@ -126,6 +126,8 @@ void generic_multikernel_interrupt(void);
 #define MK_SYS_SHUTDOWN_ACK (MK_MSG_SYSTEM + 3)
 //EO -> 4 est une operation
 #define MK_SYS_TEST_FINISH  (MK_MSG_SYSTEM + 4)
+//EO -> 11
+#define MK_SYS_TEST_FINISH_ACK (MK_MSG_SYSTEM + 5) 
 
 /**
  * Core message structure

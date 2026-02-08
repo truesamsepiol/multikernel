@@ -925,6 +925,23 @@ static void mk_shutdown_work_fn(struct work_struct *work)
 	stop_this_cpu(NULL);
 }
 
+//EO -> 11
+static void mk_test_finish_work_fn(struct work_struct *work)
+{
+	struct mk_shutdown_work *sw = container_of(work, struct mk_shutdown_work, work);
+	struct mk_resource_ack ack;
+
+	ack.operation = MK_SYS_TEST_FINISH;
+	ack.result = 0;
+	ack.resource_id = root_instance->id;
+
+	mk_send_message(sw->sender_instance_id, MK_MSG_SYSTEM, MK_SYS_TEST_FINISH_ACK,
+			&ack, sizeof(ack));
+	kfree(sw);
+
+	local_irq_disable();
+}
+
 static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
 				  void *payload, u32 payload_len, void *ctx)
 {
@@ -960,26 +977,34 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
 					ack->resource_id, ack->result);
 		break;
 	}
-	//EO -> n
+	//EO -> 10
 	case MK_SYS_TEST_FINISH : {
-		/*struct mk_shutdown_payload *req = payload;
+		struct mk_shutdown_payload *req = payload;
 		struct mk_shutdown_work *sw;
 
 		if (payload_len < sizeof(*req))
 			return;
 
-		pr_emerg("Shutdown requested by instance %d\n", req->sender_instance_id);
+		pr_info("Finish requested by instance %d\n", req->sender_instance_id);//EO-> status,seed
 
 		sw = kmalloc(sizeof(*sw), GFP_ATOMIC);
 		if (!sw)
 			return;
 
-		INIT_WORK(&sw->work, mk_shutdown_work_fn);
+		INIT_WORK(&sw->work, mk_test_finish_work_fn);
 		sw->flags = req->flags;
 		sw->sender_instance_id = req->sender_instance_id;
 		schedule_work(&sw->work);
-		*/
-		pr_info("Capture du message du Test Kernel");
+		
+		break;
+	}
+	case MK_SYS_TEST_FINISH_ACK : { // EO -> 12 
+		struct mk_resource_ack *ack = payload;
+
+		if (payload_len < sizeof(*ack))
+			return;
+		mk_msg_pending_complete(MK_MSG_SYSTEM, MK_SYS_TEST_FINISH,
+					ack->resource_id, ack->result);
 		break;
 	}
 	default:

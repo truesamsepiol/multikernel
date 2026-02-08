@@ -195,8 +195,6 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 		return -ENODEV;
 	}
 
-	pr_info("instance->ipi_data exist");
-
 	do {
 		head = atomic_read(&instance->ipi_data->ring.head);
 		next_head = (head + 1) % MK_IPI_RING_SIZE;
@@ -228,7 +226,7 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 	cpu = find_first_bit(instance->cpus, NR_CPUS);
 
 	apic_icr_write(APIC_DM_FIXED | APIC_DEST_PHYSICAL | MULTIKERNEL_VECTOR,
-		       cpu); // EO -> generic_multikernel_interrupt est la fonction appelé par le vecteur d'interuption mutltikernel
+		       cpu); 
 
 	mk_instance_put(instance);
 	return 0;
