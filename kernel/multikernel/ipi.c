@@ -173,7 +173,7 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 	return 0;
 }
 
-//EO -> 6
+//EO -> 4
 int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size, unsigned long type)
 {
 	struct mk_ipi_data *slot;
@@ -286,7 +286,7 @@ static void multikernel_interrupt_handler(void)
 		for (handler = mk_handlers; handler; handler = handler->next) {
 			if (handler->ipi_type == slot->type) {
 				handler->saved_data = slot;
-				irq_work_queue(&handler->work); // EO -> 8
+				irq_work_queue(&handler->work); // EO -> 6
 			}
 		}
 		raw_spin_unlock(&mk_handlers_lock);
@@ -316,7 +316,7 @@ static void multikernel_interrupt_handler(void)
  *
  * This is the function that gets called by the IPI vector handler.
  */
-void generic_multikernel_interrupt(void) // EO -> 7
+void generic_multikernel_interrupt(void) // EO -> 5
 {
 	multikernel_interrupt_handler(); 
 }

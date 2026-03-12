@@ -1,22 +1,33 @@
 #include <linux/fs.h>
-#include <linux/module.h>
+#include <linux/module.h> 
+#include <linux/multikernel.h>
+
+//EO -> 1
 
 static ssize_t eo_write(struct file *file,
                                const char __user *buf,
                                size_t count,
                                loff_t *ppos)
 {
-    char kbuf[64];
+	char eo_buf[MK_WRITE_MAX_DATA_SIZE]; 
+	size_t to_copy;
+	int ret;
+    
+	if(count == 0)
+	    return 0;
 
-    if (count > sizeof(kbuf))
-        count = sizeof(kbuf);
+	to_copy = min(count, (size_t)(MK_WRITE_MAX_DATA_SIZE));
 
-    if (copy_from_user(kbuf, buf, count))
-        return -EFAULT;
+	if(copy_from_user(eo_buf, buf, to_copy))
+	    return -EFAULT;
 
-    pr_info("mychardev: got %zu bytes: %*phN\n", count, (int)count, kbuf);
-
-    return count; 
+	eo_buf[to_copy] = '\0';
+	
+	ret = multikernel_eo_write(eo_buf, to_copy);
+	if(ret)
+	      return ret;	
+	
+	return to_copy; 
 }
 
 static const struct file_operations eo_fops = {
@@ -46,10 +57,3 @@ module_exit(my_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("EO -> Linux driver");
 MODULE_AUTHOR("Eric OKALA");
-
-/*
-// Ensuite côté user :
-
-mknod /dev/eo_driver c <major> 0
-echo "test" > /dev/eo_driver   # -> appellera eo_write
-*/

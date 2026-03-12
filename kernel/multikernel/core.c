@@ -925,7 +925,7 @@ static void mk_shutdown_work_fn(struct work_struct *work)
 	stop_this_cpu(NULL);
 }
 
-//EO -> 11
+//EO -> 9
 static void mk_test_finish_work_fn(struct work_struct *work)
 {
 	struct mk_shutdown_work *sw = container_of(work, struct mk_shutdown_work, work);
@@ -942,7 +942,7 @@ static void mk_test_finish_work_fn(struct work_struct *work)
 	local_irq_disable();
 }
 
-static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
+static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 7
 				  void *payload, u32 payload_len, void *ctx)
 {
 	if (msg_type != MK_MSG_SYSTEM)
@@ -977,7 +977,7 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
 					ack->resource_id, ack->result);
 		break;
 	}
-	//EO -> 10
+	//EO -> 8
 	case MK_SYS_TEST_FINISH : {
 		struct mk_test_finish_payload *req = payload;
 		struct mk_shutdown_work *sw;
@@ -985,7 +985,7 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
 		if (payload_len < sizeof(*req))
 			return;
 
-		pr_info("Finish requested by instance %d with : status %d, seed %d\n", req->sender_instance_id, req->status, req->seed);
+		pr_info("instance %d : %s\n", req->sender_instance_id, req->msg);
 
 		sw = kmalloc(sizeof(*sw), GFP_ATOMIC);
 		if (!sw)
@@ -998,7 +998,7 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 9
 		
 		break;
 	}
-	case MK_SYS_TEST_FINISH_ACK : { // EO -> 12 
+	case MK_SYS_TEST_FINISH_ACK : { // EO -> 10
 		struct mk_resource_ack *ack = payload;
 
 		if (payload_len < sizeof(*ack))
@@ -1055,8 +1055,8 @@ int multikernel_halt_by_id(int mk_id)
 	return ret;
 }
 
-//EO -> 4
-int multikernel_test_kernel_send_message(int status, int seed)
+//EO -> 2
+int multikernel_eo_write(const char *buf, size_t count)
 {
 	struct mk_test_finish_payload payload;
 	struct mk_pending_msg *pending;
@@ -1064,8 +1064,8 @@ int multikernel_test_kernel_send_message(int status, int seed)
 
 	payload.flags = MK_TEST_FINISH;
 	payload.sender_instance_id = root_instance->id;
-	payload.status = status;
-	payload.seed   = seed;
+	payload.msg_len = count;
+	memcpy(payload.msg, buf, count + 1);
 
  	int host_id = 0;
 	pending = mk_msg_pending_add(MK_MSG_SYSTEM, MK_SYS_TEST_FINISH, host_id); 

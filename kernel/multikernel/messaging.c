@@ -12,7 +12,7 @@
 #include <linux/completion.h>
 #include <linux/multikernel.h>
 
-//EO -> 5 pour rendre root_instance visible
+//EO -> 3 pour rendre root_instance visible
 #include "internal.h"
 
 /* Pending message tracking for request-response pattern */
@@ -219,7 +219,7 @@ int mk_send_message(int instance_id, u32 msg_type, u32 subtype,
 	msg->msg_type = msg_type;
 	msg->msg_subtype = subtype;
 	//msg->msg_id = 0;
-	msg->msg_id = root_instance->id; //EO -> 5 l'id du kernel qui envoie le message 
+	msg->msg_id = root_instance->id; //EO -> 3 l'id du kernel qui envoie le message 
 	msg->payload_len = payload_len;
 
 	/* Copy payload if provided */
@@ -228,8 +228,7 @@ int mk_send_message(int instance_id, u32 msg_type, u32 subtype,
 
 
 	/* Send via IPI using the message type as IPI type */
-	//ret = multikernel_send_ipi_data(instance_id, msg, total_size, msg_type);
-	//EO -> 5
+	//EO -> 3
 	if(instance_id == 0)
 		ret = multikernel_test_send_ipi_data(instance_id, msg, total_size, msg_type);
 	else
@@ -242,12 +241,6 @@ int mk_send_message(int instance_id, u32 msg_type, u32 subtype,
 		pr_err("Failed to send multikernel message: %d\n", ret);
 		return ret;
 	}
-
-	//pr_debug("Multikernel message sent: type=0x%x, subtype=0x%x, len=%u to instance %d\n",
-		 //msg_type, subtype, payload_len, instance_id);
-
-	pr_info("Multikernel message sent: type=0x%x, subtype=0x%x, len=%u to instance %d\n",
-		 msg_type, subtype, payload_len, instance_id); // EO -> 5 
 
 	return 0;
 }

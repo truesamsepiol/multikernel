@@ -722,12 +722,6 @@ struct multikernel_boot_args {
 	int mk_id;
 };
 
-// EO -> 3
-struct my_multikernel_boot_args {
-        int status;
-	int seed;
-};
-
 /*
  * Reboot system call: for obvious reasons only root may call it,
  * and even root needs to set up some magic numbers in the registers
@@ -741,8 +735,6 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 {
 	struct pid_namespace *pid_ns = task_active_pid_ns(current);
 	struct multikernel_boot_args boot_args;
-	//EO -> 3
-	struct my_multikernel_boot_args my_boot_args;
 	char buffer[256];
 	int ret = 0;
 
@@ -822,12 +814,6 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		if (copy_from_user(&boot_args, arg, sizeof(boot_args)))
 			return -EFAULT;
 		ret = multikernel_halt_by_id(boot_args.mk_id);
-		break;
-	//EO -> 3	
-	case LINUX_REBOOT_CMD_MULTIKERNEL_TEST_KERNEL_FINISH :
-		if (copy_from_user(&my_boot_args, arg, sizeof(my_boot_args)))
-			return -EFAULT;
-		ret = multikernel_test_kernel_send_message(my_boot_args.status, my_boot_args.seed);
 		break;
 #endif
 
