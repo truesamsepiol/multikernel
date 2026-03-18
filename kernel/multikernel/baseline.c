@@ -144,7 +144,7 @@ static int mk_baseline_parse_memory(const void *fdt, int resources_node,
 	return 0;
 }
 
-static void mk_baseline_clear_resources(struct mk_instance *instance)
+void mk_baseline_clear_resources(struct mk_instance *instance)
 {
 	struct mk_pci_device *pci_dev, *pci_tmp;
 
@@ -160,6 +160,7 @@ static void mk_baseline_clear_resources(struct mk_instance *instance)
 	instance->pci_device_count = 0;
 	instance->pci_devices_valid = false;
 }
+
 
 static int mk_baseline_validate_cpus(const struct mk_instance *instance)
 {
@@ -371,7 +372,7 @@ static int mk_baseline_initialize_cpus(const struct mk_instance *instance)
 			continue;
 		}
 
-		ret = remove_cpu(logical_cpu);
+		ret = remove_cpu(logical_cpu); 
 		if (ret) {
 			pr_err("Failed to offline CPU %u (logical %d): %d\n",
 			       phys_cpu_id, logical_cpu, ret);

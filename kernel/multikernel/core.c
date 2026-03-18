@@ -92,14 +92,15 @@ static void mk_instance_release(struct kref *kref)
 	pr_info("Releasing multikernel instance %d (%s), returning resources to root\n",
 		instance->id, instance->name);
 
-	mk_instance_return_all_cpus(instance);
-	mk_instance_return_pci_devices(instance);
+	mk_instance_return_all_cpus(instance); 
+	mk_instance_return_pci_devices(instance); //EO -> retrive: prochaine etape
 	mk_instance_free_memory(instance);
 
 	kfree(instance->cpus);
 	kfree(instance->dtb_data);
 	kfree(instance->name);
 	kfree(instance);
+	mk_baseline_clear_resources(root_instance);//EO -> retrive: 3
 }
 
 /**
@@ -300,6 +301,7 @@ int mk_instance_return_cpus(struct mk_instance *instance,
 	int phys_cpu;
 	int not_found = 0;
 	int requested_count;
+	int logical_cpu; //EO -> retrive: 1
 
 	if (!cpus || !instance->cpus || !root_instance || !root_instance->cpus) {
 		pr_err("Invalid CPU bitmaps for return\n");
@@ -332,6 +334,15 @@ int mk_instance_return_cpus(struct mk_instance *instance,
 	for_each_set_bit(phys_cpu, cpus, NR_CPUS) {
 		clear_bit(phys_cpu, instance->cpus);
 		set_bit(phys_cpu, root_instance->cpus);
+		//EO -> retrive: 2
+		logical_cpu = arch_cpu_from_physical_id(phys_cpu);
+		int ret = add_cpu(logical_cpu);
+	       	if (ret) 
+			pr_err("Failed to online CPU %u (logical %d): %d\n",
+			       phys_cpu, logical_cpu, ret);
+		else
+			pr_info("Onlined CPU %u (logical %d) for host kernel\n",
+				phys_cpu, logical_cpu);
 	}
 
 	pr_info("Returned %d CPUs from instance %d (%s) to root: %*pbl\n",

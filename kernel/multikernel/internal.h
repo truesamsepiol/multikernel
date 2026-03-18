@@ -32,3 +32,5 @@ int mk_handle_cpu_remove(struct mk_cpu_resource_payload *payload, u32 payload_le
 
 /* baseline.c */
 int mk_baseline_validate_and_initialize(const void *fdt, size_t fdt_size);
+//EO -> retrive: 4 cette fonction etait static
+void mk_baseline_clear_resources(struct mk_instance *instance);
