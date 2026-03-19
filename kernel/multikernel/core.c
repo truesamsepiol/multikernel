@@ -35,6 +35,9 @@ static void mk_instance_return_pci_devices(struct mk_instance *instance)
 {
 	struct mk_pci_device *pci_dev, *pci_tmp;
 	int returned_count = 0;
+	//EO -> retrive: 2
+	int ret;
+	struct pci_dev *dev;
 
 	if (!instance || !instance->pci_devices_valid)
 		return;
@@ -64,7 +67,25 @@ static void mk_instance_return_pci_devices(struct mk_instance *instance)
 		root_instance->pci_device_count++;
 		root_instance->pci_devices_valid = true;
 
-		pr_debug("Returned PCI device %04x:%02x:%02x.%d from instance %d to root\n",
+		//EO -> retrive: 2 retourner le device à l'host
+		dev = pci_get_domain_bus_and_slot(pci_dev->domain, pci_dev->bus,
+                                                  PCI_DEVFN(pci_dev->slot, pci_dev->func));
+		if(!dev)
+			pr_info("PCI device %04x:%02x:%02x.%d not found\n",
+            			root_dev->domain, root_dev->bus, root_dev->slot,
+            			root_dev->func);
+
+		ret = device_attach(&dev->dev);
+		if(ret == 0)
+    			pr_info("PCI device %04x:%02x:%02x.%d from instance %d not matching driver was found\n",
+            			root_dev->domain, root_dev->bus, root_dev->slot,
+            			root_dev->func, instance->id);
+		if (ret < 0)
+    			pr_info("PCI device %04x:%02x:%02x.%d from instance %d is not registered (err=%d)\n",
+            			root_dev->domain, root_dev->bus, root_dev->slot,
+            			root_dev->func, instance->id, ret);
+
+		pr_info("Returned PCI device %04x:%02x:%02x.%d from instance %d to root\n",
 			 root_dev->domain, root_dev->bus, root_dev->slot,
 			 root_dev->func, instance->id);
 
