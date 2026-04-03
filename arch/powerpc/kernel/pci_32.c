@@ -258,7 +258,7 @@ static int __init pcibios_init(void)
 
 	if (pci_has_flag(PCI_REASSIGN_ALL_BUS))
 		pci_assign_all_buses = 1;
-
+	
 	/* Scan all of the recorded PCI controllers.  */
 	list_for_each_entry_safe(hose, tmp, &hose_list, list_node) {
 #ifndef CONFIG_PPC_PCI_BUS_NUM_DOMAIN_DEPENDENT

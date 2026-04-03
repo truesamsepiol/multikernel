@@ -5,10 +5,15 @@
 #include <asm/x86_init.h>
 #include <asm/irqdomain.h>
 
+#include <linux/multikernel.h> //EO -> pas de devices
+
 /* arch_initcall has too random ordering, so call the initializers
    in the right sequence from here. */
 static __init int pci_arch_init(void)
 {
+	if(eo_no_devices)//EO -> pas de devices
+		return 0;
+	
 	int type, pcbios = 1;
 
 	type = pci_direct_probe();

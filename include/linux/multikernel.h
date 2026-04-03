@@ -318,6 +318,7 @@ void mk_messaging_cleanup(void);
 
 struct resource;
 
+
 extern phys_addr_t multikernel_alloc(size_t size);
 extern void multikernel_free(phys_addr_t addr, size_t size);
 extern struct resource *multikernel_get_pool_resource(void);
@@ -816,4 +817,6 @@ bool mk_pci_device_allowed(struct pci_bus *bus, int devfn, u16 vendor, u16 devic
  */
 bool mk_platform_device_allowed(const char *name, const char *hid);
 
+
+extern bool eo_no_devices; //EO -> pas de devices
 #endif /* _LINUX_MULTIKERNEL_H */

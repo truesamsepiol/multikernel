@@ -39,6 +39,7 @@
  */
 struct mk_instance *root_instance = NULL;
 
+bool eo_no_devices = false; //EO -> pas de devices
 /**
  * mk_kho_preserve_dtb() - Preserve multikernel DTB for kexec
  * @image: Target kimage
@@ -176,7 +177,7 @@ static int mk_dt_extract_instance_info(const void *dtb_data, size_t dtb_size,
 	return 0;
 }
 
-static int __init mk_kho_restore_cpus(struct mk_dt_config *config)
+static int __init mk_kho_restore_cpus(struct mk_dt_config *config) // EO -> recuperer tous les cpus
 {
 	int phys_cpu_id;
 	cpumask_var_t new_possible;
@@ -206,10 +207,11 @@ static int __init mk_kho_restore_cpus(struct mk_dt_config *config)
 
 		if (logical_cpu >= 0) {
 			cpumask_set_cpu(logical_cpu, new_possible);
-			pr_debug("Static CPU: physical %d -> logical %d\n",
+			pr_info("Static CPU: physical %d -> logical %d\n",
 				 phys_cpu_id, logical_cpu);
-		} else {
-			pr_warn("Failed to register physical CPU %d\n", phys_cpu_id);
+		} else { //EO -> pourquoi les logical_cpu sont negatif?
+			pr_warn("Failed to register physical CPU %d (EO -> logical CPU %d)\n", 
+					phys_cpu_id, logical_cpu);
 		}
 	}
 
@@ -307,7 +309,7 @@ static int __init mk_kho_copy_pci_devices(const struct mk_dt_config *config,
 		INIT_LIST_HEAD(&instance->pci_devices);
 		instance->pci_device_count = 0;
 		instance->pci_devices_valid = false;
-		pr_debug("No PCI devices in DTB\n");
+		eo_no_devices = true; //EO -> pas de devices
 		return 0;
 	}
 
@@ -502,6 +504,7 @@ int __init mk_kho_restore_dtbs(void)
 	const void *kho_fdt = NULL;
 	phys_addr_t fdt_phys;
 
+
 	fdt_phys = kho_get_fdt_phys();
 	if (!fdt_phys) {
 		pr_info("No KHO FDT available for multikernel DTB restoration\n");
@@ -526,6 +529,7 @@ int __init mk_kho_restore_dtbs(void)
 	}
 
 	pr_info("Restoring multikernel DTB from KHO (phys: 0x%llx)\n", fdt_phys);
+
 
 	/* Map the FDT for early boot access */
 	kho_fdt = early_memremap(fdt_phys, PAGE_SIZE);
