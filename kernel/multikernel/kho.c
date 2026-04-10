@@ -177,7 +177,7 @@ static int mk_dt_extract_instance_info(const void *dtb_data, size_t dtb_size,
 	return 0;
 }
 
-static int __init mk_kho_restore_cpus(struct mk_dt_config *config) // EO -> recuperer tous les cpus
+static int __init mk_kho_restore_cpus(struct mk_dt_config *config)
 {
 	int phys_cpu_id;
 	cpumask_var_t new_possible;
@@ -209,8 +209,8 @@ static int __init mk_kho_restore_cpus(struct mk_dt_config *config) // EO -> recu
 			cpumask_set_cpu(logical_cpu, new_possible);
 			pr_info("Static CPU: physical %d -> logical %d\n",
 				 phys_cpu_id, logical_cpu);
-		} else { //EO -> pourquoi les logical_cpu sont negatif?
-			pr_warn("Failed to register physical CPU %d (EO -> logical CPU %d)\n", 
+		} else { 
+			pr_info("Failed to register physical CPU %d (EO -> logical CPU %d)\n", 
 					phys_cpu_id, logical_cpu);
 		}
 	}

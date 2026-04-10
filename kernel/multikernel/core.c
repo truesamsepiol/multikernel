@@ -114,7 +114,7 @@ static void mk_instance_release(struct kref *kref)
 		instance->id, instance->name);
 
 	mk_instance_return_all_cpus(instance); 
-	mk_instance_return_pci_devices(instance); //EO -> retrive: prochaine etape
+	mk_instance_return_pci_devices(instance);
 	mk_instance_free_memory(instance);
 
 	kfree(instance->cpus);
@@ -1016,7 +1016,6 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 7
 
 		if (payload_len < sizeof(*req))
 			return;
-
 		pr_info("instance %d : %s\n", req->sender_instance_id, req->msg);
 
 		sw = kmalloc(sizeof(*sw), GFP_ATOMIC);
