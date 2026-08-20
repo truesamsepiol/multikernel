@@ -435,7 +435,8 @@ struct mk_instance {
 	char *name;                     /* User-provided instance name */
 	enum mk_instance_state state;   /* Current state */
 
-	//EO -> 1 ajouter le chemin vers les outputs du test kernel
+	//EO -> output
+	char *output; /* fichier contenant la sortie stdout du test kernel */ 
 
 	/* Resource management - list of reserved memory regions */
 	struct list_head memory_regions;  /* List of struct mk_memory_region */
