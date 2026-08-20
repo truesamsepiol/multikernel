@@ -1009,6 +1009,16 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
 		if (ret) goto err_free;
 	}
 
+	// EO -> output begin
+	if(instance != root_instance){
+		ret = fdt_property_string(fdt, "stdout", instance->output);
+		if(ret)
+			pr_info("[EO -> output ] erreur sur le fichier de sortie");
+		else
+			pr_info("[EO -> outptut SUCESSFUL] stdout : %s", instance->output);	
+	}
+	// EO -> output end
+
 	/* End resources node */
 	ret = fdt_end_node(fdt);
 	if (ret) goto err_free;
