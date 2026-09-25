@@ -259,6 +259,13 @@ int mk_create_instance_from_dtb(const char *name, int id, const void *fdt,
 		goto err_free_name;
 	}
 
+	// EO -> output begin	
+	int len;
+	const char *output = fdt_getprop(fdt, resources_node, "stdout", &len);
+	instance->output = kstrdup(output, GFP_KERNEL);
+	pr_info("[EO -> outptut SUCESSFUL ] stdout : %s", instance->output); 
+	// EO -> output end 
+
 	mk_dt_config_init(&config);
 	ret = mk_dt_parse_resources(fdt, resources_node, name, &config);
 	if (ret) {
