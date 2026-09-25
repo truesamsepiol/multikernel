@@ -95,6 +95,10 @@ void mk_dt_config_free(struct mk_dt_config *config)
 	config->memory_size = 0;
 
 	/* Note: We don't free dtb_data here as it's managed by the caller */
+
+	//EO -> stdout_path
+	kfree(config->stdout_path);
+	config->stdout_path = NULL;
 }
 
 /**
@@ -498,6 +502,44 @@ static int mk_dt_parse_devices(const void *fdt, int chosen_node,
 	return 0;
 }
 
+//EO -> stdout_path
+static int mk_dt_parse_stdout_path(const void *fdt,
+                                  int resources_node,
+                                  struct mk_dt_config *config)
+{
+	const char *stdout_path;
+    	int len;
+
+    	if (!fdt || resources_node < 0 || !config)
+        	return -EINVAL;
+
+    	stdout_path = fdt_getprop(fdt, resources_node,
+                              "stdout_path", &len);
+
+    	if (!stdout_path) {
+        	if (len == -FDT_ERR_NOTFOUND) {
+            		pr_info("No stdout_path specified\n");
+            		return 0;
+        	}
+
+        	pr_err("Failed to read stdout_path: %d\n", len);
+        	return -EINVAL;
+    	}
+
+    	if (len <= 0 || stdout_path[len - 1] != '\0') {
+        	pr_err("Invalid stdout_path property\n");
+        	return -EINVAL;
+    	}	
+
+    	config->stdout_path = kstrdup(stdout_path, GFP_KERNEL);
+    	if (!config->stdout_path)
+        	return -ENOMEM;
+
+    	pr_info("Parsed stdout_path: '%s'\n", config->stdout_path);
+
+    	return 0;
+}
+
 /**
  * Main device tree parsing function
  */
@@ -567,6 +609,14 @@ int mk_dt_parse(const void *dtb_data, size_t dtb_size,
 		return ret;
 	}
 
+	//EO -> stdout_path
+	ret = mk_dt_parse_stdout_path(fdt, resources_node, config);
+	if (ret) {
+    		pr_err("Failed to parse stdout: %d\n", ret);
+    		mk_dt_config_free(config);
+    		return ret;
+	}
+
 	pr_info("Successfully parsed multikernel device tree with %zu bytes memory, %d CPUs, %d PCI devices, and %d platform devices\n",
 		config->memory_size, config->cpus ? bitmap_weight(config->cpus, NR_CPUS) : 0,
 		config->pci_device_count, config->platform_device_count);
@@ -617,10 +667,18 @@ int mk_dt_parse_resources(const void *fdt, int resources_node,
 		return ret;
 	}
 
-	pr_info("Successfully parsed instance '%s': %zu bytes memory, %d CPUs, %d PCI devices, %d platform devices\n",
+	//EO -> stdout_path
+	ret = mk_dt_parse_stdout_path(fdt, resources_node, config);
+	if (ret) {
+    		pr_err("Failed to parse stdout for instance '%s': %d\n", instance_name, ret);
+    		mk_dt_config_free(config);
+    		return ret;
+	}
+
+	pr_info("Successfully parsed instance '%s': %zu bytes memory, %d CPUs, %d PCI devices, %d platform devices, %s path of stdout\n",
 		instance_name, config->memory_size,
 		config->cpus ? bitmap_weight(config->cpus, NR_CPUS) : 0,
-		config->pci_device_count, config->platform_device_count);
+		config->pci_device_count, config->platform_device_count, config->stdout_path ? config->stdout_path : "NULL"); //EO -> stdout_path
 	return 0;
 }
 
@@ -1007,6 +1065,13 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
 
 		ret = fdt_end_node(fdt); /* /resources/devices */
 		if (ret) goto err_free;
+	}
+
+	//EO -> stdout_path
+	if (instance->stdout_path) {
+    		ret = fdt_property_string(fdt, "stdout_path", instance->stdout_path);
+    		if (ret)
+        		goto err_free;
 	}
 
 	/* End resources node */

@@ -265,6 +265,17 @@ int mk_create_instance_from_dtb(const char *name, int id, const void *fdt,
 		pr_err("Failed to parse resources for instance '%s': %d\n", name, ret);
 		goto err_free_cpumask;
 	}
+	
+	//EO -> stdout_path
+	if (config.stdout_path) {
+    		instance->stdout_path = kstrdup(config.stdout_path, GFP_KERNEL);
+    		if (!instance->stdout_path) {
+        		ret = -ENOMEM;
+        		goto err_free_config;
+    		}
+
+    		pr_info("Instance '%s': stdout_path = '%s'\n", name, instance->stdout_path);
+	}
 
 	INIT_LIST_HEAD(&instance->memory_regions);
 	INIT_LIST_HEAD(&instance->list);
@@ -340,6 +351,9 @@ err_remove_dir:
 	kernfs_remove(kn);
 	mk_instance_put(instance);
 err_free_config:
+	//EO -> stdout_path
+	kfree(instance->stdout_path);
+	instance->stdout_path = NULL;
 	mk_dt_config_free(&config);
 err_free_cpumask:
 	kfree(instance->cpus);

@@ -422,6 +422,9 @@ struct mk_dt_config {
 	/* Raw device tree data */
 	void *dtb_data;
 	size_t dtb_size;
+
+	//EO -> stdout_path
+	char *stdout_path;
 };
 
 /**
@@ -475,6 +478,9 @@ struct mk_instance {
 
 	/* Reference counting */
 	struct kref refcount;           /* Reference count for cleanup */
+
+	// EO -> stdout_path
+	char *stdout_path;
 };
 
 /**

@@ -20,6 +20,12 @@
 #include <asm/smp.h>
 #include "internal.h"
 
+//EO -> stdout_path
+#include <linux/fs.h>
+#include <linux/limits.h>
+#include <linux/slab.h>
+#include <linux/workqueue.h>
+
 static void mk_instance_return_all_cpus(struct mk_instance *instance)
 {
 	if (!instance || !instance->cpus)
@@ -957,8 +963,59 @@ static void mk_shutdown_work_fn(struct work_struct *work)
 	stop_this_cpu(NULL);
 }
 
+//EO -> stdout_path
+struct mk_test_finish_work {
+	struct work_struct work;
+
+    	u32 flags;
+    	int sender_instance_id;
+
+    	u32 msg_len;
+    	char msg[MK_WRITE_MAX_DATA_SIZE];
+};
+
+//EO -> stdout_path
+static int mk_write_stdout_path(struct mk_instance *instance,
+                                const char *msg,
+                                size_t msg_len)
+{
+    	struct file *file;
+    	loff_t pos = 0;
+    	ssize_t written;
+    	int ret = 0;
+
+    	if (!instance || !instance->stdout_path)
+        	return -ENOENT;
+
+    	if (!msg && msg_len)
+        	return -EINVAL;
+
+    	file = filp_open(instance->stdout_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    	if (IS_ERR(file)) {
+        	ret = PTR_ERR(file);
+        	pr_err("Failed to open stdout_path '%s': %d\n", instance->stdout_path, ret);
+        	return ret;
+    	}
+
+    	if (msg_len > 0) {
+        	written = kernel_write(file, msg, msg_len, &pos);
+
+        	if (written < 0) {
+            		ret = written;
+            		pr_err("Failed to write stdout_path '%s': %d\n", instance->stdout_path, ret);
+        	} else if (written != msg_len) {
+            		ret = -EIO;
+            		pr_err("Incomplete write to stdout_path '%s': %zd/%zu bytes\n", instance->stdout_path, written, msg_len);
+        	}
+    	}
+
+    	filp_close(file, NULL);
+
+    	return ret;
+}
+
 //EO -> 9
-static void mk_test_finish_work_fn(struct work_struct *work)
+/*static void mk_test_finish_work_fn(struct work_struct *work)
 {
 	struct mk_shutdown_work *sw = container_of(work, struct mk_shutdown_work, work);
 	struct mk_resource_ack ack;
@@ -973,6 +1030,40 @@ static void mk_test_finish_work_fn(struct work_struct *work)
 
 	local_irq_disable();
 }
+*/
+
+//EO -> stdout_path
+static void mk_test_finish_work_fn(struct work_struct *work)
+{
+    	struct mk_test_finish_work *tw = container_of(work, struct mk_test_finish_work, work);
+
+    	struct mk_instance *instance;
+    	struct mk_resource_ack ack;
+    	int ret;
+
+    	instance = mk_instance_find(tw->sender_instance_id);
+    	if (!instance) {
+        	pr_err("TEST_FINISH: instance %d not found\n", tw->sender_instance_id);
+        	ret = -ENOENT;
+        	goto send_ack;
+    	}
+
+    	ret = mk_write_stdout_path(instance, tw->msg, tw->msg_len);
+
+    	mk_instance_put(instance);
+
+send_ack:
+    	ack.operation = MK_SYS_TEST_FINISH;
+    	ack.result = ret;
+    	ack.resource_id = root_instance->id;
+
+    	if (mk_send_message(tw->sender_instance_id, MK_MSG_SYSTEM, MK_SYS_TEST_FINISH_ACK, &ack, sizeof(ack)) < 0) {
+        	pr_err("Failed to send TEST_FINISH_ACK to instance %d\n", tw->sender_instance_id);
+    	}
+
+   	kfree(tw);
+}
+
 
 static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 7
 				  void *payload, u32 payload_len, void *ctx)
@@ -1009,25 +1100,38 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 7
 					ack->resource_id, ack->result);
 		break;
 	}
-	//EO -> 8
+	//EO -> stdout_path
 	case MK_SYS_TEST_FINISH : {
-		struct mk_test_finish_payload *req = payload;
-		struct mk_shutdown_work *sw;
+	 	struct mk_test_finish_payload *req = payload;
+    		struct mk_test_finish_work *tw;
 
-		if (payload_len < sizeof(*req))
-			return;
-		pr_info("instance %d : %s\n", req->sender_instance_id, req->msg);
+    		if (payload_len < sizeof(*req)) {
+        		pr_err("TEST_FINISH: invalid payload size %u\n", payload_len);
+        		return;
+    		}
 
-		sw = kmalloc(sizeof(*sw), GFP_ATOMIC);
-		if (!sw)
-			return;
+    		if (req->msg_len > sizeof(req->msg)) {
+        		pr_err("TEST_FINISH: invalid msg_len %u\n", req->msg_len);
+        		return;
+    		}
 
-		INIT_WORK(&sw->work, mk_test_finish_work_fn);
-		sw->flags = req->flags;
-		sw->sender_instance_id = req->sender_instance_id;
-		schedule_work(&sw->work);
-		
-		break;
+    		tw = kmalloc(sizeof(*tw), GFP_ATOMIC);
+    		if (!tw) {
+        		pr_err("TEST_FINISH: failed to allocate work\n");
+        		return;
+    		}
+
+    		tw->flags = req->flags;
+    		tw->sender_instance_id = req->sender_instance_id;
+    		tw->msg_len = req->msg_len;
+
+    		if (tw->msg_len > 0)
+        		memcpy(tw->msg, req->msg, tw->msg_len);
+
+    		INIT_WORK(&tw->work, mk_test_finish_work_fn);
+    		schedule_work(&tw->work);
+
+    		break;	
 	}
 	case MK_SYS_TEST_FINISH_ACK : { // EO -> 10
 		struct mk_resource_ack *ack = payload;
@@ -1092,13 +1196,21 @@ int multikernel_eo_write(const char *buf, size_t count)
 	struct mk_test_finish_payload payload;
 	struct mk_pending_msg *pending;
 	int ret;
+ 	int host_id = 0;
+
+	if (!buf)
+        	return -EINVAL;
+
+    	if (count > sizeof(payload.msg) - 1)
+        	return -EMSGSIZE;
 
 	payload.flags = MK_TEST_FINISH;
 	payload.sender_instance_id = root_instance->id;
 	payload.msg_len = count;
-	memcpy(payload.msg, buf, count + 1);
 
- 	int host_id = 0;
+	memcpy(payload.msg, buf, count);
+	payload.msg[count] = '\0';
+
 	pending = mk_msg_pending_add(MK_MSG_SYSTEM, MK_SYS_TEST_FINISH, host_id); 
 	if (!pending) {
 		return -ENOMEM;
