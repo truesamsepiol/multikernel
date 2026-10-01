@@ -884,6 +884,7 @@ static void __init x86_report_nx(void)
  */
 
 extern void __init setup_trampolines_bsp(void);
+extern void __init multikernel_flexmem_reserve(void); //EO -> flex_pool
 
 void __init setup_arch(char **cmdline_p)
 {
@@ -1197,6 +1198,7 @@ void __init setup_arch(char **cmdline_p)
 
 	initmem_init();
 	dma_contiguous_reserve(max_pfn_mapped << PAGE_SHIFT);
+	multikernel_flexmem_reserve(); //EO -> flex_pool
 
 	if (boot_cpu_has(X86_FEATURE_GBPAGES)) {
 		hugetlb_cma_reserve(PUD_SHIFT - PAGE_SHIFT);
