@@ -34,3 +34,12 @@ int mk_handle_cpu_remove(struct mk_cpu_resource_payload *payload, u32 payload_le
 int mk_baseline_validate_and_initialize(const void *fdt, size_t fdt_size);
 //EO -> retrive: 4 cette fonction etait static
 void mk_baseline_clear_resources(struct mk_instance *instance);
+
+//EO -> flex_pool
+bool multikernel_flexmem_enabled(void);
+bool multikernel_flexmem_available(size_t size);
+int multikernel_flexmem_create_instance_pool(int instance_id, size_t pool_size, int min_alloc_order,
+					      void **pool_handle, phys_addr_t *base);
+void multikernel_flexmem_destroy_instance_pool(void *pool_handle, phys_addr_t base, size_t size);
+int multikernel_flexmem_acquire(size_t size, phys_addr_t *base); 
+void multikernel_flexmem_release(phys_addr_t base, size_t size);

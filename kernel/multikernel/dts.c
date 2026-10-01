@@ -720,11 +720,13 @@ static int mk_dt_validate_memory(const struct mk_dt_config *config)
 	struct resource *pool_res;
 
 	/* Get multikernel pool resource for validation */
+	//EO -> flex_pool
 	pool_res = multikernel_get_pool_resource();
-	if (!pool_res && config->memory_size > 0) {
-		pr_err("No multikernel pool available for memory allocation\n");
-		return -ENODEV;
-	}
+
+	if (!pool_res && config->memory_size > 0 && !multikernel_flexmem_enabled()) {
+    		pr_err("No multikernel memory pool available\n");
+    		return -ENODEV;
+	}	
 
 	/* Validate memory size */
 	if (config->memory_size > 0) {
@@ -801,14 +803,15 @@ bool mk_dt_resources_available(const struct mk_dt_config *config)
 		return false;
 
 	/* Check if multikernel pool is available */
+	//EO -> flex_pool
 	pool_res = multikernel_get_pool_resource();
-	if (!pool_res) {
-		pr_debug("No multikernel pool available\n");
-		return false;
-	}
+	if (!pool_res && !multikernel_flexmem_enabled()) {
+    		pr_debug("No multikernel memory pool available\n");
+    		return false;
+	}	
 
 	/* Check if requested memory size is available */
-	if (config->memory_size > 0) {
+	if (pool_res && config->memory_size > 0) {
 		resource_size_t pool_size = resource_size(pool_res);
 		if (pool_size < config->memory_size) {
 			pr_debug("Pool too small: need %zu, have %llu\n",

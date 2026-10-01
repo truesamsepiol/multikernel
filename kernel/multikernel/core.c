@@ -635,9 +635,35 @@ static int mk_instance_transfer_memory(struct mk_instance *instance, u64 size)
 		return -ENOMEM;
 	}
 
-	instance->instance_pool = multikernel_create_instance_pool(instance->id,
-								   size,
-								   PAGE_SHIFT);
+	//EO -> flex_pool
+	if (multikernel_flexmem_enabled()) {
+		phys_addr_t flex_base;
+
+		ret = multikernel_flexmem_create_instance_pool(instance->id, size, PAGE_SHIFT,
+		&instance->instance_pool, &flex_base);
+
+		if (ret) {
+			pr_err("Failed to create flexible instance pool for instance %d (%s): %d\n",
+		       instance->id, instance->name, ret);
+		return ret;
+		}
+
+		instance->flexmem_base = flex_base;
+		instance->flexmem_size = size;
+	} else {
+		instance->instance_pool = multikernel_create_instance_pool(instance->id, size,
+				PAGE_SHIFT);
+
+		if (!instance->instance_pool) {
+			pr_err("Failed to create instance pool for instance %d (%s)\n",
+		       	instance->id, instance->name);
+			return -ENOMEM;
+		}
+
+		instance->flexmem_base = 0;
+		instance->flexmem_size = 0;
+	}		
+
 	if (!instance->instance_pool) {
 		pr_err("Failed to create instance pool for instance %d (%s)\n",
 		       instance->id, instance->name);
@@ -670,13 +696,19 @@ static int mk_instance_transfer_memory(struct mk_instance *instance, u64 size)
 		region->res.flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
 		region->chunk = chunk;
 
-		ret = insert_resource(&multikernel_res, &region->res);
-		if (ret) {
-			pr_err("Failed to insert resource for instance %d region %d: %d\n",
-			       instance->id, region_num, ret);
-			kfree(region->res.name);
-			kfree(region);
-			goto cleanup;
+		//EO -> flex_pool
+		if (!multikernel_flexmem_enabled()) {
+    			ret = insert_resource(&multikernel_res, &region->res);
+    			if (ret) {
+        			pr_err("Failed to insert resource for instance %d region %d: %d\n",
+               				instance->id, region_num, ret);
+        			kfree(region->res.name);
+        			kfree(region);
+        			goto cleanup;
+    			}
+		} else {
+    			pr_debug("Flexible memory region for instance %d: 0x%llx-0x%llx is not inserted under multikernel_res\n",
+             			instance->id, (unsigned long long)region->res.start, (unsigned long long)region->res.end);
 		}
 
 		INIT_LIST_HEAD(&region->list);
@@ -748,12 +780,20 @@ void mk_instance_free_memory(struct mk_instance *instance)
 	}
 
 	instance->region_count = 0;
+	//EO -> flex_pool
 	if (instance->instance_pool) {
-		pr_info("Returning 0x%llx bytes from instance %d (%s) back to multikernel pool\n",
-			total_freed, instance->id, instance->name);
+		pr_info("Returning 0x%llx bytes from instance %d (%s)\n", total_freed, instance->id,
+		instance->name);
 
-		/* Destroy instance pool - this returns memory to global multikernel pool */
-		multikernel_destroy_instance_pool(instance->instance_pool);
+		if (multikernel_flexmem_enabled()) {
+			multikernel_flexmem_destroy_instance_pool(instance->instance_pool,
+			instance->flexmem_base, instance->flexmem_size);
+			instance->flexmem_base = 0;
+			instance->flexmem_size = 0;
+		} else {
+			multikernel_destroy_instance_pool(instance->instance_pool);
+		}
+
 		instance->instance_pool = NULL;
 		instance->pool_size = 0;
 	}

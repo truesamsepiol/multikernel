@@ -444,6 +444,10 @@ struct mk_instance {
 	/* Memory pool for this instance */
 	void *instance_pool;            /* Handle for instance-specific memory pool */
 	size_t pool_size;               /* Size of the instance pool */
+	
+	//EO -> flex_pool
+	phys_addr_t flexmem_base;
+	size_t flexmem_size;
 
 	/* CPU resources */
 	unsigned long *cpus;             /* Bitmap of assigned physical CPU IDs */
