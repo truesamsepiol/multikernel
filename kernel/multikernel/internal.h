@@ -43,3 +43,4 @@ int multikernel_flexmem_create_instance_pool(int instance_id, size_t pool_size, 
 void multikernel_flexmem_destroy_instance_pool(void *pool_handle, phys_addr_t base, size_t size);
 int multikernel_flexmem_acquire(size_t size, phys_addr_t *base); 
 void multikernel_flexmem_release(phys_addr_t base, size_t size);
+size_t multikernel_flexmem_size(void);

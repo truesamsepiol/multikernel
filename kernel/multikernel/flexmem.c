@@ -12,6 +12,8 @@
 static phys_addr_t mk_flex_pool_size;
 static struct cma *mk_flex_cma;
 
+
+
 static int __init mkkernel_flex_pool_setup(char *str)
 {
 	char *cur = str;
@@ -228,4 +230,9 @@ void multikernel_flexmem_destroy_instance_pool(void *pool_handle, phys_addr_t ba
 bool multikernel_flexmem_enabled(void)
 {
 	return mk_flex_cma != NULL;
+}
+
+size_t multikernel_flexmem_size(void)
+{
+    return mk_flex_pool_size;
 }

@@ -69,13 +69,63 @@ static int mk_baseline_parse_cpus(const void *fdt, int resources_node,
 	return 0;
 }
 
+//EO -> flex_pool
 static int mk_baseline_parse_memory(const void *fdt, int resources_node,
 				    struct mk_instance *instance)
 {
 	const fdt32_t *prop;
 	struct mk_memory_region *region;
+	const char *memory_mode;
 	u64 memory_base, memory_size;
 	int len;
+
+	memory_mode = fdt_getprop(fdt, resources_node,
+				  "memory-mode", &len);
+
+	if (memory_mode) {
+		if (strcmp(memory_mode, "flex") == 0) {
+			prop = fdt_getprop(fdt, resources_node,
+					   "memory-bytes", &len);
+			if (!prop) {
+				pr_err("No 'memory-bytes' property in FLEX baseline\n");
+				return -EINVAL;
+			}
+
+			if (len != 8) {
+				pr_err("Invalid 'memory-bytes' property length: %d "
+				       "(must be 8 bytes)\n", len);
+				return -EINVAL;
+			}
+
+			memory_size = fdt64_to_cpu(*(const fdt64_t *)prop);
+
+			if (!memory_size) {
+				pr_err("Invalid FLEX memory capacity 0\n");
+				return -EINVAL;
+			}
+
+			if (memory_size & (PAGE_SIZE - 1)) {
+				pr_err("FLEX memory capacity 0x%llx "
+				       "not page-aligned\n",
+				       memory_size);
+				return -EINVAL;
+			}
+
+			instance->flexmem_enabled = true;
+			instance->flexmem_capacity = memory_size;
+
+			pr_info("Baseline FLEX memory pool: capacity=0x%llx "
+				"(%llu MB), physical base allocated dynamically "
+				"by CMA\n",
+				memory_size,
+				memory_size >> 20);
+
+			return 0;
+		}
+
+		pr_err("Unknown baseline memory-mode '%s'\n", memory_mode);
+		return -EINVAL;
+	}
 
 	prop = fdt_getprop(fdt, resources_node, "memory-base", &len);
 	if (!prop) {
@@ -84,9 +134,11 @@ static int mk_baseline_parse_memory(const void *fdt, int resources_node,
 	}
 
 	if (len != 8) {
-		pr_err("Invalid 'memory-base' property length: %d (must be 8 bytes)\n", len);
+		pr_err("Invalid 'memory-base' property length: %d "
+		       "(must be 8 bytes)\n", len);
 		return -EINVAL;
 	}
+
 	memory_base = fdt64_to_cpu(*(const fdt64_t *)prop);
 
 	prop = fdt_getprop(fdt, resources_node, "memory-bytes", &len);
@@ -96,12 +148,14 @@ static int mk_baseline_parse_memory(const void *fdt, int resources_node,
 	}
 
 	if (len != 8) {
-		pr_err("Invalid 'memory-bytes' property length: %d (must be 8 bytes)\n", len);
+		pr_err("Invalid 'memory-bytes' property length: %d "
+		       "(must be 8 bytes)\n", len);
 		return -EINVAL;
 	}
+
 	memory_size = fdt64_to_cpu(*(const fdt64_t *)prop);
 
-	if (memory_size == 0) {
+	if (!memory_size) {
 		pr_err("Invalid memory size 0 in baseline\n");
 		return -EINVAL;
 	}
@@ -116,7 +170,6 @@ static int mk_baseline_parse_memory(const void *fdt, int resources_node,
 		return -EINVAL;
 	}
 
-	/* Create memory region for root instance pool */
 	region = kzalloc(sizeof(*region), GFP_KERNEL);
 	if (!region) {
 		pr_err("Failed to allocate memory region for baseline pool\n");
@@ -132,8 +185,8 @@ static int mk_baseline_parse_memory(const void *fdt, int resources_node,
 	region->res.start = memory_base;
 	region->res.end = memory_base + memory_size - 1;
 	region->res.flags = IORESOURCE_MEM;
-	INIT_LIST_HEAD(&region->list);
 
+	INIT_LIST_HEAD(&region->list);
 	list_add_tail(&region->list, &instance->memory_regions);
 
 	pr_info("Baseline memory pool: 0x%llx-0x%llx (%llu MB)\n",
@@ -306,6 +359,21 @@ static int mk_baseline_validate_memory(const struct mk_instance *instance)
 	struct mk_memory_region *region;
 	u64 pool_start, pool_end;
 	u64 total_size = 0;
+
+	//EO -> flex_pool
+	if (instance->flexmem_enabled) {
+		if (!instance->flexmem_capacity) {
+			pr_err("FLEX baseline has zero memory capacity\n");
+			return -EINVAL;
+		}
+
+		pr_info("Baseline memory validated: FLEX capacity "
+			"0x%zx bytes (%zu MB)\n",
+			instance->flexmem_capacity,
+			instance->flexmem_capacity >> 20);
+
+		return 0;
+	}
 
 	pool_res = multikernel_get_pool_resource();
 	if (!pool_res) {

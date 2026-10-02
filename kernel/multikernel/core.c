@@ -618,22 +618,25 @@ static int mk_instance_transfer_memory(struct mk_instance *instance, u64 size)
 	}
 
 	if (!root_instance) {
-		pr_err("No root instance - cannot transfer memory\n");
-		return -EINVAL;
+    		pr_err("No root instance - cannot transfer memory\n");
+    		return -EINVAL;
 	}
 
-	/* Calculate available memory from root_instance regions */
-	u64 available = 0;
-	struct mk_memory_region *root_region;
-	list_for_each_entry(root_region, &root_instance->memory_regions, list) {
-		available += resource_size(&root_region->res);
-	}
+	if (!multikernel_flexmem_enabled()) {
+    		u64 available = 0;
+    		struct mk_memory_region *root_region;
 
-	if (size > available) {
-		pr_err("Requested memory (0x%llx) exceeds available pool (0x%llx)\n",
-		       size, available);
-		return -ENOMEM;
-	}
+    		list_for_each_entry(root_region,
+                        	&root_instance->memory_regions, list)
+        	available += resource_size(&root_region->res);
+
+    		if (size > available) {
+        		pr_err("Requested memory (0x%llx) exceeds available pool (0x%llx)\n",
+               			size, available);
+        		return -ENOMEM;
+    		}
+	}	
+		
 
 	//EO -> flex_pool
 	if (multikernel_flexmem_enabled()) {
@@ -645,7 +648,7 @@ static int mk_instance_transfer_memory(struct mk_instance *instance, u64 size)
 		if (ret) {
 			pr_err("Failed to create flexible instance pool for instance %d (%s): %d\n",
 		       instance->id, instance->name, ret);
-		return ret;
+			return ret;
 		}
 
 		instance->flexmem_base = flex_base;

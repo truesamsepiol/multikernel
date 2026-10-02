@@ -986,8 +986,16 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
 
 	ret = fdt_begin_node(fdt, "resources");
 	if (ret) goto err_free;
+	
+	if (multikernel_flexmem_enabled()) {
+		ret = fdt_property_string(fdt, "memory-mode", "flex");
+		if (ret)
+			goto err_free;
 
-	if (!list_empty(&instance->memory_regions)) {
+		ret = fdt_property_u64(fdt, "memory-bytes", multikernel_flexmem_size());
+		if (ret)
+			goto err_free;
+	}else if (!list_empty(&instance->memory_regions)) {
 		struct mk_memory_region *region;
 		u64 total_size = 0;
 		u64 base_addr = 0;

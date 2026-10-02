@@ -444,6 +444,10 @@ struct mk_instance {
 	/* Memory pool for this instance */
 	void *instance_pool;            /* Handle for instance-specific memory pool */
 	size_t pool_size;               /* Size of the instance pool */
+
+	//EO -> flex_pool
+	size_t flexmem_capacity;
+	bool flexmem_enabled;
 	
 	//EO -> flex_pool
 	phys_addr_t flexmem_base;
