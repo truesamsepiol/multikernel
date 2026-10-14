@@ -49,6 +49,41 @@ static int __init mkkernel_flex_pool_setup(char *str)
 }
 early_param("mkkernel_flex_pool", mkkernel_flex_pool_setup);
 
+/*
+ * mkkernel_flex_borrow=default|never|<1-99>
+ * Controls when the buddy allocator may lend the flexible CMA pool to
+ * movable allocations of the root kernel.
+ */
+static int __init mkkernel_flex_borrow_setup(char *str)
+{
+	int pct;
+
+	if (!str || !*str)
+		return -EINVAL;
+
+	if (!strcmp(str, "default")) {
+		pct = CMA_BORROW_DEFAULT;
+	} else if (!strcmp(str, "never")) {
+		pct = 0;
+	} else if (kstrtoint(str, 10, &pct) || pct < 1 || pct > 99) {
+		pr_err("EO_multikernel: invalid mkkernel_flex_borrow=%s\n", str);
+		return -EINVAL;
+	}
+
+	cma_set_borrow_threshold(pct);
+
+	if (pct < 0)
+		pr_info("EO_multikernel: CMA borrow policy: default\n");
+	else if (!pct)
+		pr_info("EO_multikernel: CMA borrow policy: never\n");
+	else
+		pr_info("EO_multikernel: CMA borrow policy: below %d%% free non-CMA\n",
+			pct);
+
+	return 0;
+}
+early_param("mkkernel_flex_borrow", mkkernel_flex_borrow_setup);
+
 void __init multikernel_flexmem_reserve(void)
 {
 	int ret;

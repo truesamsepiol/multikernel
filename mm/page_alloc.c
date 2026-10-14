@@ -55,6 +55,7 @@
 #include <linux/delayacct.h>
 #include <linux/cacheinfo.h>
 #include <linux/pgalloc_tag.h>
+#include <linux/cma.h>
 #include <asm/div64.h>
 #include "internal.h"
 #include "shuffle.h"
@@ -3706,12 +3707,43 @@ alloc_flags_nofragment(struct zone *zone, gfp_t gfp_mask)
 	return alloc_flags;
 }
 
+#ifdef CONFIG_CMA
+static int cma_borrow_threshold __read_mostly = CMA_BORROW_DEFAULT;
+
+void cma_set_borrow_threshold(int pct)
+{
+	WRITE_ONCE(cma_borrow_threshold, pct);
+}
+
+/*
+ * Decide whether movable allocations may be served from CMA pageblocks.
+ * Only lock-free global counters are read, as this runs in the fast path.
+ */
+static inline bool cma_borrow_allowed(void)
+{
+	int pct = READ_ONCE(cma_borrow_threshold);
+	unsigned long free_pages, free_cma, normal_free, normal_total;
+
+	if (likely(pct < 0))
+		return true;
+	if (!pct)
+		return false;
+
+	normal_total = totalram_pages() - totalcma_pages;
+	free_pages = global_zone_page_state(NR_FREE_PAGES);
+	free_cma = global_zone_page_state(NR_FREE_CMA_PAGES);
+	normal_free = free_pages > free_cma ? free_pages - free_cma : 0;
+
+	return normal_free * 100 < (unsigned long)pct * normal_total;
+}
+#endif
+
 /* Must be called after current_gfp_context() which can change gfp_mask */
 static inline unsigned int gfp_to_alloc_flags_cma(gfp_t gfp_mask,
 						  unsigned int alloc_flags)
 {
 #ifdef CONFIG_CMA
-	if (gfp_migratetype(gfp_mask) == MIGRATE_MOVABLE)
+	if (gfp_migratetype(gfp_mask) == MIGRATE_MOVABLE && cma_borrow_allowed())
 		alloc_flags |= ALLOC_CMA;
 #endif
 	return alloc_flags;
