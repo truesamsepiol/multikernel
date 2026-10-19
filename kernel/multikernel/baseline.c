@@ -212,6 +212,8 @@ void mk_baseline_clear_resources(struct mk_instance *instance)
 	}
 	instance->pci_device_count = 0;
 	instance->pci_devices_valid = false;
+	instance->flexmem_enabled = false;
+	instance->flexmem_capacity = 0;
 }
 
 
@@ -360,11 +362,26 @@ static int mk_baseline_validate_memory(const struct mk_instance *instance)
 	u64 pool_start, pool_end;
 	u64 total_size = 0;
 
-	//EO -> flex_pool
+	/*
+	 * The memory mode is set at boot by mkkernel_flex_pool=, which the
+	 * rest of the code relies on. The baseline must agree with it.
+	 */
 	if (instance->flexmem_enabled) {
 		if (!instance->flexmem_capacity) {
 			pr_err("FLEX baseline has zero memory capacity\n");
 			return -EINVAL;
+		}
+
+		if (!multikernel_flexmem_enabled()) {
+			pr_err("FLEX baseline requires the flexible CMA pool "
+			       "(boot with mkkernel_flex_pool=)\n");
+			return -ENODEV;
+		}
+
+		if (instance->flexmem_capacity > multikernel_flexmem_size()) {
+			pr_err("FLEX baseline capacity 0x%zx exceeds flexible CMA pool 0x%zx\n",
+			       instance->flexmem_capacity, multikernel_flexmem_size());
+			return -ERANGE;
 		}
 
 		pr_info("Baseline memory validated: FLEX capacity "
@@ -373,6 +390,12 @@ static int mk_baseline_validate_memory(const struct mk_instance *instance)
 			instance->flexmem_capacity >> 20);
 
 		return 0;
+	}
+
+	if (multikernel_flexmem_enabled()) {
+		pr_err("Static baseline rejected: the flexible CMA pool is active, "
+		       "use memory-mode = \"flex\"\n");
+		return -EINVAL;
 	}
 
 	pool_res = multikernel_get_pool_resource();
