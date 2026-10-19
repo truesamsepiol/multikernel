@@ -37,7 +37,6 @@ void mk_baseline_clear_resources(struct mk_instance *instance);
 
 //EO -> flex_pool
 bool multikernel_flexmem_enabled(void);
-bool multikernel_flexmem_available(size_t size);
 int multikernel_flexmem_create_instance_pool(int instance_id, size_t pool_size, int min_alloc_order,
 					      void **pool_handle, phys_addr_t *base);
 void multikernel_flexmem_destroy_instance_pool(void *pool_handle, phys_addr_t base, size_t size);
