@@ -127,6 +127,36 @@ static int status_seq_show(struct seq_file *sf, void *v)
 	return 0;
 }
 
+
+/* Physical base address of the instance CMA pool */
+static int flexmem_base_seq_show(struct seq_file *sf, void *v)
+{
+	struct kernfs_open_file *of = sf->private;
+	struct mk_instance *instance = of->kn->priv;
+
+	seq_printf(sf, "0x%llx\n",
+		   (unsigned long long)instance->flexmem_base);
+	return 0;
+}
+
+/* Size of the instance CMA pool */
+static int flexmem_size_seq_show(struct seq_file *sf, void *v)
+{
+	struct kernfs_open_file *of = sf->private;
+	struct mk_instance *instance = of->kn->priv;
+
+	seq_printf(sf, "0x%zx\n", instance->flexmem_size);
+	return 0;
+}
+
+static const struct kernfs_ops mk_flexmem_base_ops = {
+	.seq_show = flexmem_base_seq_show,
+};
+
+static const struct kernfs_ops mk_flexmem_size_ops = {
+	.seq_show = flexmem_size_seq_show,
+};
+
 /* Root-level flex_borrow attribute - CMA borrow policy of the flexible pool */
 static int flex_borrow_seq_show(struct seq_file *sf, void *v)
 {
@@ -446,6 +476,24 @@ static int mk_create_instance_files(struct mk_instance *instance)
 				  &mk_instance_device_tree_ops, instance, NULL, NULL);
 	if (IS_ERR(kn)) {
 		pr_err("Failed to create device_tree file for instance %s\n", instance->name);
+		return PTR_ERR(kn);
+	}
+
+	kn = __kernfs_create_file(instance->kn, "flexmem_base", 0444,
+				  GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+				  &mk_flexmem_base_ops, instance, NULL, NULL);
+	if (IS_ERR(kn)) {
+		pr_err("Failed to create flexmem_base file for instance %s\n",
+		       instance->name);
+		return PTR_ERR(kn);
+	}
+
+	kn = __kernfs_create_file(instance->kn, "flexmem_size", 0444,
+				  GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+				  &mk_flexmem_size_ops, instance, NULL, NULL);
+	if (IS_ERR(kn)) {
+		pr_err("Failed to create flexmem_size file for instance %s\n",
+		       instance->name);
 		return PTR_ERR(kn);
 	}
 

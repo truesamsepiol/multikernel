@@ -121,7 +121,7 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 		memset(instance->ipi_data, 0, sizeof(struct mk_shared_data));
 		pr_info("Initialized IPI ring buffer for instance %d: phys=0x%llx, virt=%px\n",
 			instance->id, (unsigned long long)instance->kimage->kho.ipi,
-			instance->ipi_data);
+			instance->ipi_data); //EO -> crash sysreq
 	}
 
 	if (!instance->ipi_data) {

@@ -168,7 +168,7 @@ int mk_msg_pending_wait(struct mk_pending_msg *pending, unsigned long timeout_ms
 
 	if (!wait_for_completion_timeout(&pending->done, timeout)) {
 		pr_err("Timeout waiting for operation 0x%x on resource %u\n",
-		       pending->operation, pending->resource_id);
+		       pending->operation, pending->resource_id); //EO -> crash sysreq
 		result = -ETIMEDOUT;
 	} else {
 		result = pending->result;
