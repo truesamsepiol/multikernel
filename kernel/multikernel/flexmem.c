@@ -10,6 +10,8 @@
 #include <linux/genalloc.h>
 #include <linux/gfp.h>
 #include <linux/mutex.h>
+#include <linux/multikernel.h>
+#include "internal.h"
 
 static phys_addr_t mk_flex_pool_size;
 static struct cma *mk_flex_cma;

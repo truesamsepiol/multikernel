@@ -56,6 +56,7 @@
 #include <asm/thermal.h>
 #include <asm/unwind.h>
 #include <asm/vsyscall.h>
+#include <linux/multikernel.h>
 
 /*
  * max_low_pfn_mapped: highest directly mapped pfn < 4 GB
@@ -884,7 +885,6 @@ static void __init x86_report_nx(void)
  */
 
 extern void __init setup_trampolines_bsp(void);
-extern void __init multikernel_flexmem_reserve(void); //EO -> flex_pool
 
 void __init setup_arch(char **cmdline_p)
 {
