@@ -322,7 +322,8 @@ bool multikernel_flexmem_enabled(void)
 	return mk_flex_cma != NULL;
 }
 
+/* Actual pool size: CMA rounds the requested size up to a pageblock */
 size_t multikernel_flexmem_size(void)
 {
-    return mk_flex_pool_size;
+	return mk_flex_cma ? cma_get_size(mk_flex_cma) : 0;
 }
