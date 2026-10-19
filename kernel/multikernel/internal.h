@@ -44,3 +44,5 @@ void multikernel_flexmem_destroy_instance_pool(void *pool_handle, phys_addr_t ba
 int multikernel_flexmem_acquire(size_t size, phys_addr_t *base); 
 void multikernel_flexmem_release(phys_addr_t base, size_t size);
 size_t multikernel_flexmem_size(void);
+int multikernel_flexmem_parse_borrow(const char *str, int *pct);
+void multikernel_flexmem_set_borrow(int pct);

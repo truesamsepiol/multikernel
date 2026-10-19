@@ -3715,6 +3715,11 @@ void cma_set_borrow_threshold(int pct)
 	WRITE_ONCE(cma_borrow_threshold, pct);
 }
 
+int cma_get_borrow_threshold(void)
+{
+	return READ_ONCE(cma_borrow_threshold);
+}
+
 /*
  * Decide whether movable allocations may be served from CMA pageblocks.
  * Only lock-free global counters are read, as this runs in the fast path.

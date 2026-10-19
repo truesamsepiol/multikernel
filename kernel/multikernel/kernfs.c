@@ -27,6 +27,7 @@
 #include <linux/multikernel.h>
 #include <linux/libfdt.h>
 #include <linux/sizes.h>
+#include <linux/cma.h>
 #include "internal.h"
 
 #define MULTIKERNEL_MAGIC	0x6d6b6673	/* "mkfs" */
@@ -125,6 +126,37 @@ static int status_seq_show(struct seq_file *sf, void *v)
 	seq_printf(sf, "%s\n", mk_state_to_string(instance->state));
 	return 0;
 }
+
+/* Root-level flex_borrow attribute - CMA borrow policy of the flexible pool */
+static int flex_borrow_seq_show(struct seq_file *sf, void *v)
+{
+	int pct = cma_get_borrow_threshold();
+
+	if (pct < 0)
+		seq_puts(sf, "default\n");
+	else if (!pct)
+		seq_puts(sf, "never\n");
+	else
+		seq_printf(sf, "%d\n", pct);
+	return 0;
+}
+
+static ssize_t flex_borrow_write(struct kernfs_open_file *of, char *buf,
+				 size_t count, loff_t off)
+{
+	int pct;
+
+	if (multikernel_flexmem_parse_borrow(strim(buf), &pct))
+		return -EINVAL;
+
+	multikernel_flexmem_set_borrow(pct);
+	return count;
+}
+
+static const struct kernfs_ops mk_flex_borrow_ops = {
+	.seq_show = flex_borrow_seq_show,
+	.write = flex_borrow_write,
+};
 
 /* Root-level device_tree attribute - shows current baseline pool from kernel structures */
 static int root_device_tree_seq_show(struct seq_file *sf, void *v)
@@ -565,6 +597,16 @@ int mk_kernfs_init(void)
 	if (IS_ERR(device_tree_kn)) {
 		ret = PTR_ERR(device_tree_kn);
 		pr_err("Failed to create root device_tree file: %d\n", ret);
+		kernfs_destroy_root(mk_kernfs_root);
+		return ret;
+	}
+
+	struct kernfs_node *flex_borrow_kn = __kernfs_create_file(mk_root_kn, "flex_borrow", 0644,
+								   GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+								   &mk_flex_borrow_ops, NULL, NULL, NULL);
+	if (IS_ERR(flex_borrow_kn)) {
+		ret = PTR_ERR(flex_borrow_kn);
+		pr_err("Failed to create root flex_borrow file: %d\n", ret);
 		kernfs_destroy_root(mk_kernfs_root);
 		return ret;
 	}

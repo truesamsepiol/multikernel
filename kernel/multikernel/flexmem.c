@@ -8,6 +8,8 @@
 #include <linux/memblock.h>
 #include <linux/types.h>
 #include <linux/genalloc.h>
+#include <linux/gfp.h>
+#include <linux/mutex.h>
 
 static phys_addr_t mk_flex_pool_size;
 static struct cma *mk_flex_cma;
@@ -50,6 +52,43 @@ static int __init mkkernel_flex_pool_setup(char *str)
 early_param("mkkernel_flex_pool", mkkernel_flex_pool_setup);
 
 /*
+ * Borrow policy of the flexible CMA pool: "default", "never" or a
+ * percentage 1..99 (see CMA_BORROW_DEFAULT in <linux/cma.h>).
+ * Shared by the boot parameter and the kernfs flex_borrow file.
+ */
+int multikernel_flexmem_parse_borrow(const char *str, int *pct)
+{
+	if (!str || !*str || !pct)
+		return -EINVAL;
+
+	if (!strcmp(str, "default")) {
+		*pct = CMA_BORROW_DEFAULT;
+		return 0;
+	}
+
+	if (!strcmp(str, "never")) {
+		*pct = 0;
+		return 0;
+	}
+
+	if (kstrtoint(str, 10, pct) || *pct < 1 || *pct > 99)
+		return -EINVAL;
+
+	return 0;
+}
+
+static void multikernel_flexmem_log_borrow(int pct)
+{
+	if (pct < 0)
+		pr_info("EO_multikernel: CMA borrow policy: default\n");
+	else if (!pct)
+		pr_info("EO_multikernel: CMA borrow policy: never\n");
+	else
+		pr_info("EO_multikernel: CMA borrow policy: below %d%% free non-CMA\n",
+			pct);
+}
+
+/*
  * mkkernel_flex_borrow=default|never|<1-99>
  * Controls when the buddy allocator may lend the flexible CMA pool to
  * movable allocations of the root kernel.
@@ -58,31 +97,45 @@ static int __init mkkernel_flex_borrow_setup(char *str)
 {
 	int pct;
 
-	if (!str || !*str)
-		return -EINVAL;
-
-	if (!strcmp(str, "default")) {
-		pct = CMA_BORROW_DEFAULT;
-	} else if (!strcmp(str, "never")) {
-		pct = 0;
-	} else if (kstrtoint(str, 10, &pct) || pct < 1 || pct > 99) {
+	if (multikernel_flexmem_parse_borrow(str, &pct)) {
 		pr_err("EO_multikernel: invalid mkkernel_flex_borrow=%s\n", str);
 		return -EINVAL;
 	}
 
+	/* Too early to drain per-cpu lists, and nothing has been lent yet */
 	cma_set_borrow_threshold(pct);
-
-	if (pct < 0)
-		pr_info("EO_multikernel: CMA borrow policy: default\n");
-	else if (!pct)
-		pr_info("EO_multikernel: CMA borrow policy: never\n");
-	else
-		pr_info("EO_multikernel: CMA borrow policy: below %d%% free non-CMA\n",
-			pct);
+	multikernel_flexmem_log_borrow(pct);
 
 	return 0;
 }
 early_param("mkkernel_flex_borrow", mkkernel_flex_borrow_setup);
+
+static DEFINE_MUTEX(mk_flex_borrow_mutex);
+
+/*
+ * Runtime policy change. Per-cpu free lists may still hold CMA pages
+ * taken while borrowing was allowed, and they are handed out without
+ * any ALLOC_CMA check. When the policy becomes stricter, drain them
+ * back to the buddy MIGRATE_CMA free lists where the policy applies.
+ */
+void multikernel_flexmem_set_borrow(int pct)
+{
+	int old;
+	bool stricter;
+
+	mutex_lock(&mk_flex_borrow_mutex);
+
+	old = cma_get_borrow_threshold();
+	stricter = pct >= 0 && (old < 0 || pct < old);
+
+	cma_set_borrow_threshold(pct);
+	if (stricter)
+		drain_all_pages(NULL);
+
+	mutex_unlock(&mk_flex_borrow_mutex);
+
+	multikernel_flexmem_log_borrow(pct);
+}
 
 void __init multikernel_flexmem_reserve(void)
 {
