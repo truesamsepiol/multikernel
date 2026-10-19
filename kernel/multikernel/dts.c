@@ -987,7 +987,11 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
 	ret = fdt_begin_node(fdt, "resources");
 	if (ret) goto err_free;
 	
-	if (multikernel_flexmem_enabled()) {
+	/*
+	 * Only the root owns the flexible pool. Child instances describe the
+	 * CMA region they were given, which sits in their memory_regions.
+	 */
+	if (instance == root_instance && multikernel_flexmem_enabled()) {
 		ret = fdt_property_string(fdt, "memory-mode", "flex");
 		if (ret)
 			goto err_free;
