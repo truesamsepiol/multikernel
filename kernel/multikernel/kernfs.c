@@ -471,7 +471,11 @@ static int mk_create_instance_files(struct mk_instance *instance)
 		return PTR_ERR(kn);
 	}
 
-	kn = __kernfs_create_file(instance->kn, "device_tree", 0444,
+	/*
+	 * device_tree and flexmem_base expose the instance physical memory
+	 * address: restrict them to root, like /proc/iomem does.
+	 */
+	kn = __kernfs_create_file(instance->kn, "device_tree", 0400,
 				  GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
 				  &mk_instance_device_tree_ops, instance, NULL, NULL);
 	if (IS_ERR(kn)) {
@@ -479,7 +483,7 @@ static int mk_create_instance_files(struct mk_instance *instance)
 		return PTR_ERR(kn);
 	}
 
-	kn = __kernfs_create_file(instance->kn, "flexmem_base", 0444,
+	kn = __kernfs_create_file(instance->kn, "flexmem_base", 0400,
 				  GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
 				  &mk_flexmem_base_ops, instance, NULL, NULL);
 	if (IS_ERR(kn)) {
