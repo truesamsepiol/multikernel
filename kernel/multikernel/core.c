@@ -1012,6 +1012,7 @@ struct mk_test_finish_work {
 
     	u32 flags;
     	int sender_instance_id;
+    	u32 seq;
 
     	u32 msg_len;
     	char msg[MK_WRITE_MAX_DATA_SIZE];
@@ -1098,7 +1099,8 @@ static void mk_test_finish_work_fn(struct work_struct *work)
 send_ack:
     	ack.operation = MK_SYS_TEST_FINISH;
     	ack.result = ret;
-    	ack.resource_id = root_instance->id;
+    	/* Echo the sequence number: the sender matches its waiter on it */
+    	ack.resource_id = tw->seq;
 
     	if (mk_send_message(tw->sender_instance_id, MK_MSG_SYSTEM, MK_SYS_TEST_FINISH_ACK, &ack, sizeof(ack)) < 0) {
         	pr_err("Failed to send TEST_FINISH_ACK to instance %d\n", tw->sender_instance_id);
@@ -1166,6 +1168,7 @@ static void mk_system_msg_handler(u32 msg_type, u32 subtype, // EO -> 7
 
     		tw->flags = req->flags;
     		tw->sender_instance_id = req->sender_instance_id;
+    		tw->seq = req->seq;
     		tw->msg_len = req->msg_len;
 
     		if (tw->msg_len > 0)
@@ -1233,12 +1236,24 @@ int multikernel_halt_by_id(int mk_id)
 	return ret;
 }
 
+/*
+ * Each message gets its own sequence number, used as the pending/ACK key,
+ * so that a late or out-of-order ACK cannot wake the wrong waiter. A lost
+ * IPI or ACK is retried with the same sequence number, within the same
+ * 30 s overall budget as before.
+ */
+#define MK_TEST_FINISH_TIMEOUT_MS	5000
+#define MK_TEST_FINISH_ATTEMPTS		6
+
+static atomic_t mk_test_finish_seq = ATOMIC_INIT(0);
+
 //EO -> 2
 int multikernel_eo_write(const char *buf, size_t count)
 {
 	struct mk_test_finish_payload payload;
 	struct mk_pending_msg *pending;
 	int ret;
+	int attempt;
  	int host_id = 0;
 
 	if (!buf)
@@ -1249,24 +1264,34 @@ int multikernel_eo_write(const char *buf, size_t count)
 
 	payload.flags = MK_TEST_FINISH;
 	payload.sender_instance_id = root_instance->id;
+	payload.seq = atomic_inc_return(&mk_test_finish_seq);
 	payload.msg_len = count;
 
 	memcpy(payload.msg, buf, count);
 	payload.msg[count] = '\0';
 
-	pending = mk_msg_pending_add(MK_MSG_SYSTEM, MK_SYS_TEST_FINISH, host_id); 
-	if (!pending) {
-		return -ENOMEM;
+	for (attempt = 1; attempt <= MK_TEST_FINISH_ATTEMPTS; attempt++) {
+		pending = mk_msg_pending_add(MK_MSG_SYSTEM, MK_SYS_TEST_FINISH,
+					     payload.seq);
+		if (!pending)
+			return -ENOMEM;
+
+		ret = mk_send_message(host_id, MK_MSG_SYSTEM, MK_SYS_TEST_FINISH,
+				      &payload, sizeof(payload));
+		if (ret < 0) {
+			mk_msg_pending_wait(pending, 0);
+			return ret;
+		}
+
+		ret = mk_msg_pending_wait(pending, MK_TEST_FINISH_TIMEOUT_MS);
+		if (ret != -ETIMEDOUT)
+			break;
+
+		pr_warn("TEST_FINISH seq %u: no ACK after %d ms (attempt %d/%d)\n",
+			payload.seq, MK_TEST_FINISH_TIMEOUT_MS, attempt,
+			MK_TEST_FINISH_ATTEMPTS);
 	}
 
-	ret = mk_send_message(host_id, MK_MSG_SYSTEM, MK_SYS_TEST_FINISH,
-			      &payload, sizeof(payload));
-	if (ret < 0) {
-		mk_msg_pending_wait(pending, 0);
-		return ret;
-	}
-
-	ret = mk_msg_pending_wait(pending, 30000);
 	if (ret == 0) {
 		pr_info("core multikernel_test_kernel_send : Test Kernel send Host Kernel message\n");
 	}

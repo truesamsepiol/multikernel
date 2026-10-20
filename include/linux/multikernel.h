@@ -223,6 +223,7 @@ struct mk_shutdown_payload {
 struct mk_test_finish_payload {
 	u32 flags;
 	int sender_instance_id;
+	u32 seq;		/* Echoed in the ACK resource_id to match the right waiter */
 	u32 msg_len;
 	char msg[MK_WRITE_MAX_DATA_SIZE];
 };
