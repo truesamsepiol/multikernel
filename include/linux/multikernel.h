@@ -7,6 +7,7 @@
 
 #include <linux/types.h>
 #include <linux/irq_work.h>
+#include <linux/llist.h>
 #include <linux/kobject.h>
 #include <linux/kernfs.h>
 #include <linux/ioport.h>
@@ -55,7 +56,7 @@ struct mk_ipi_handler {
 	void *context;
 	unsigned int ipi_type;       /* IPI type this handler is registered for */
 	struct mk_ipi_handler *next;
-	struct mk_ipi_data *saved_data;
+	struct llist_head pending;   /* Copies of received messages, drained by @work */
 	struct irq_work work;
 };
 

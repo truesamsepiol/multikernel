@@ -19,11 +19,33 @@
 static struct mk_ipi_handler *mk_handlers;
 static raw_spinlock_t mk_handlers_lock = __RAW_SPIN_LOCK_UNLOCKED(mk_handlers_lock);
 
+/* Private copy of a ring slot, queued on a handler until its irq_work runs */
+struct mk_ipi_msg {
+	struct llist_node node;
+	struct mk_ipi_data data;	/* only header + data_size bytes are valid */
+};
+
 static void handler_work(struct irq_work *work)
 {
-    struct mk_ipi_handler *handler = container_of(work, struct mk_ipi_handler, work);
-    if (handler->callback)
-        handler->callback(handler->saved_data, handler->context);
+	struct mk_ipi_handler *handler = container_of(work, struct mk_ipi_handler, work);
+	struct llist_node *list;
+	struct mk_ipi_msg *msg, *tmp;
+
+	/* llist is LIFO: reverse to deliver messages in arrival order */
+	list = llist_reverse_order(llist_del_all(&handler->pending));
+	llist_for_each_entry_safe(msg, tmp, list, node) {
+		if (handler->callback)
+			handler->callback(&msg->data, handler->context);
+		kfree(msg);
+	}
+}
+
+static void handler_drop_pending(struct mk_ipi_handler *handler)
+{
+	struct mk_ipi_msg *msg, *tmp;
+
+	llist_for_each_entry_safe(msg, tmp, llist_del_all(&handler->pending), node)
+		kfree(msg);
 }
 
 /**
@@ -49,6 +71,7 @@ struct mk_ipi_handler *multikernel_register_handler(mk_ipi_callback_t callback, 
 	handler->callback = callback;
 	handler->context = ctx;
 	handler->ipi_type = ipi_type;
+	init_llist_head(&handler->pending);
 
 	init_irq_work(&handler->work, handler_work);
 
@@ -84,9 +107,10 @@ void multikernel_unregister_handler(struct mk_ipi_handler *handler)
 	}
 	raw_spin_unlock_irqrestore(&mk_handlers_lock, flags);
 
-    /* Wait for pending work to complete */
-    irq_work_sync(&handler->work);
-    kfree(p);
+	/* Wait for pending work to complete */
+	irq_work_sync(&handler->work);
+	handler_drop_pending(handler);
+	kfree(p);
 }
 EXPORT_SYMBOL(multikernel_unregister_handler);
 
@@ -281,13 +305,30 @@ static void multikernel_interrupt_handler(void)
 		pr_info("Multikernel IPI received on CPU %d from CPU %d (slot %u, type=%u, size=%zu)\n",
 			 current_cpu, slot->sender_cpu, tail, slot->type, slot->data_size);
 
-		/* Dispatch to registered handlers */
+		/*
+		 * Dispatch to registered handlers. Each handler gets its own
+		 * copy of the slot: the slot is given back to the producer as
+		 * soon as tail moves, and several messages of the same type can
+		 * arrive before the irq_work runs.
+		 */
 		raw_spin_lock(&mk_handlers_lock);
 		for (handler = mk_handlers; handler; handler = handler->next) {
-			if (handler->ipi_type == slot->type) {
-				handler->saved_data = slot;
-				irq_work_queue(&handler->work); // EO -> 6
+			struct mk_ipi_msg *msg;
+			size_t len;
+
+			if (handler->ipi_type != slot->type)
+				continue;
+
+			len = offsetof(struct mk_ipi_data, buffer) + slot->data_size;
+			msg = kmalloc(offsetof(struct mk_ipi_msg, data) + len, GFP_ATOMIC);
+			if (!msg) {
+				pr_warn_ratelimited("Multikernel IPI: dropping message type %u (no memory)\n",
+						    slot->type);
+				continue;
 			}
+			memcpy(&msg->data, slot, len);
+			llist_add(&msg->node, &handler->pending);
+			irq_work_queue(&handler->work); // EO -> 6
 		}
 		raw_spin_unlock(&mk_handlers_lock);
 
