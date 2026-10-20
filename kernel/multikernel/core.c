@@ -132,6 +132,7 @@ static void mk_instance_release(struct kref *kref)
 	kfree(instance->cpus);
 	kfree(instance->dtb_data);
 	kfree(instance->name);
+	kfree(instance->stdout_path);	/* kstrdup() in mk_create_instance_from_dtb() */
 	kfree(instance);
 	mk_baseline_clear_resources(root_instance);//EO -> retrive: 3
 }
