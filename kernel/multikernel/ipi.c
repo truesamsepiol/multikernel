@@ -227,7 +227,8 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 		head = atomic_read(&instance->ipi_data->ring.head);
 		next_head = (head + 1) % MK_IPI_RING_SIZE;
 		tail = atomic_read_acquire(&instance->ipi_data->ring.tail);
-		pr_info("head=%u, tail=%u", head, tail);
+		pr_debug("IPI ring for instance %d: head=%u, tail=%u\n",
+			 instance_id, head, tail);
 
 		if (next_head == tail) {
 			pr_warn("IPI ring buffer full for instance %d (head=%u, tail=%u)\n",
@@ -322,9 +323,7 @@ static void multikernel_interrupt_handler(void)
 			continue;
 		}
 
-		//pr_debug("Multikernel IPI received on CPU %d from CPU %d (slot %u, type=%u, size=%zu)\n",
-			 //current_cpu, slot->sender_cpu, tail, slot->type, slot->data_size);
-		pr_info("Multikernel IPI received on CPU %d from CPU %d (slot %u, type=%u, size=%zu)\n",
+		pr_debug("Multikernel IPI received on CPU %d from CPU %d (slot %u, type=%u, size=%zu)\n",
 			 current_cpu, slot->sender_cpu, tail, slot->type, slot->data_size);
 
 		/*
