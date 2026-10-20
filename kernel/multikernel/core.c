@@ -74,22 +74,28 @@ static void mk_instance_return_pci_devices(struct mk_instance *instance)
 		root_instance->pci_devices_valid = true;
 
 		//EO -> retrive: 2 retourner le device à l'host
+		/*
+		 * Rebind the device to a host driver. The lookup takes a
+		 * reference on the device, dropped once the attach is done.
+		 */
 		dev = pci_get_domain_bus_and_slot(pci_dev->domain, pci_dev->bus,
                                                   PCI_DEVFN(pci_dev->slot, pci_dev->func));
-		if(!dev)
-			pr_info("PCI device %04x:%02x:%02x.%d not found\n",
-            			root_dev->domain, root_dev->bus, root_dev->slot,
-            			root_dev->func);
-
-		ret = device_attach(&dev->dev);
-		if(ret == 0)
-    			pr_info("PCI device %04x:%02x:%02x.%d from instance %d not matching driver was found\n",
-            			root_dev->domain, root_dev->bus, root_dev->slot,
-            			root_dev->func, instance->id);
-		if (ret < 0)
-    			pr_info("PCI device %04x:%02x:%02x.%d from instance %d is not registered (err=%d)\n",
-            			root_dev->domain, root_dev->bus, root_dev->slot,
-            			root_dev->func, instance->id, ret);
+		if (!dev) {
+			pr_warn("PCI device %04x:%02x:%02x.%d not found, no host driver bound\n",
+				root_dev->domain, root_dev->bus, root_dev->slot,
+				root_dev->func);
+		} else {
+			ret = device_attach(&dev->dev);
+			if (ret == 0)
+				pr_info("PCI device %04x:%02x:%02x.%d from instance %d not matching driver was found\n",
+					root_dev->domain, root_dev->bus, root_dev->slot,
+					root_dev->func, instance->id);
+			else if (ret < 0)
+				pr_info("PCI device %04x:%02x:%02x.%d from instance %d is not registered (err=%d)\n",
+					root_dev->domain, root_dev->bus, root_dev->slot,
+					root_dev->func, instance->id, ret);
+			pci_dev_put(dev);
+		}
 
 		pr_info("Returned PCI device %04x:%02x:%02x.%d from instance %d to root\n",
 			 root_dev->domain, root_dev->bus, root_dev->slot,
