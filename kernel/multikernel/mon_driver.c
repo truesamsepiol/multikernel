@@ -16,7 +16,12 @@ static ssize_t eo_write(struct file *file,
 	if(count == 0)
 	    return 0;
 
-	to_copy = min(count, (size_t)(MK_WRITE_MAX_DATA_SIZE));
+	/*
+	 * Keep one byte for the terminator and stay within what
+	 * multikernel_eo_write() accepts. Longer writes are partial: the
+	 * caller sends the rest in a following write().
+	 */
+	to_copy = min(count, (size_t)(MK_WRITE_MAX_DATA_SIZE - 1));
 
 	if(copy_from_user(eo_buf, buf, to_copy))
 	    return -EFAULT;
