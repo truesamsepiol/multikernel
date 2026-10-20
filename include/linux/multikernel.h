@@ -30,6 +30,7 @@
 
 /* Data structure for passing parameters via IPI */
 struct mk_ipi_data {
+	unsigned int ready;      /* 1 once the producer has filled the slot (release/acquire) */
 	int sender_cpu;          /* Which CPU sent this IPI */
 	unsigned int type;      /* User-defined type identifier */
 	size_t data_size;        /* Size of the data */

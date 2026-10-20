@@ -158,7 +158,7 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 	do {
 		head = atomic_read(&instance->ipi_data->ring.head);
 		next_head = (head + 1) % MK_IPI_RING_SIZE;
-		tail = atomic_read(&instance->ipi_data->ring.tail);
+		tail = atomic_read_acquire(&instance->ipi_data->ring.tail);
 
 		/* Check if ring buffer is full */
 		if (next_head == tail) {
@@ -183,8 +183,12 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 	if (data && data_size > 0)
 		memcpy(slot->buffer, data, data_size);
 
-	/* Ensure the slot is fully written before sending IPI */
-	smp_wmb();
+	/*
+	 * Publish the slot. head was claimed before the slot was filled, so
+	 * the consumer must not trust head alone: it waits for ready == 1.
+	 * The release orders all the writes above before the flag.
+	 */
+	smp_store_release(&slot->ready, 1);
 
 	cpu = find_first_bit(instance->cpus, NR_CPUS);
 
@@ -222,7 +226,7 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 	do {
 		head = atomic_read(&instance->ipi_data->ring.head);
 		next_head = (head + 1) % MK_IPI_RING_SIZE;
-		tail = atomic_read(&instance->ipi_data->ring.tail);
+		tail = atomic_read_acquire(&instance->ipi_data->ring.tail);
 		pr_info("head=%u, tail=%u", head, tail);
 
 		if (next_head == tail) {
@@ -245,7 +249,8 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 	if (data && data_size > 0)
 		memcpy(slot->buffer, data, data_size);
 
-	smp_wmb();
+	/* Publish the slot, see multikernel_send_ipi_data() */
+	smp_store_release(&slot->ready, 1);
 
 	cpu = find_first_bit(instance->cpus, NR_CPUS);
 
@@ -255,6 +260,18 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 	mk_instance_put(instance);
 	return 0;
 
+}
+
+/*
+ * Give a consumed slot back to the producers: clear its ready flag, then
+ * move tail with release semantics so that a producer which sees the new
+ * tail also sees ready == 0 and none of our reads of the slot are pending.
+ */
+static void mk_ipi_ring_release_slot(struct mk_ipi_ring *ring,
+				     struct mk_ipi_data *slot, unsigned int tail)
+{
+	WRITE_ONCE(slot->ready, 0);
+	atomic_set_release(&ring->tail, (tail + 1) % MK_IPI_RING_SIZE);
 }
 
 /**
@@ -268,7 +285,7 @@ static void multikernel_interrupt_handler(void)
 {
 	struct mk_ipi_data *slot;
 	struct mk_ipi_handler *handler;
-	unsigned int head, tail, next_tail;
+	unsigned int head, tail;
 	int current_cpu = smp_processor_id();
 	int messages_processed = 0;
 
@@ -284,19 +301,24 @@ static void multikernel_interrupt_handler(void)
 		if (tail == head)
 			break;
 
-		/* Ensure we read the message after checking it exists */
-		smp_rmb();
-
 		/* Get the message at tail */
 		slot = &root_instance->ipi_data->ring.entries[tail];
+
+		/*
+		 * head is claimed before the producer fills the slot. Stop here
+		 * if it is not published yet: the producer sends its IPI after
+		 * setting ready, so we will be called again. The acquire pairs
+		 * with the producer's release and orders the reads below.
+		 */
+		if (!smp_load_acquire(&slot->ready))
+			break;
 
 		/* Validate message */
 		if (slot->data_size == 0 || slot->data_size > MK_MAX_DATA_SIZE) {
 			pr_debug("Multikernel IPI: invalid message at slot %u (size=%zu)\n",
 				 tail, slot->data_size);
 			/* Advance tail to skip this message */
-			next_tail = (tail + 1) % MK_IPI_RING_SIZE;
-			atomic_set(&root_instance->ipi_data->ring.tail, next_tail);
+			mk_ipi_ring_release_slot(&root_instance->ipi_data->ring, slot, tail);
 			continue;
 		}
 
@@ -333,8 +355,7 @@ static void multikernel_interrupt_handler(void)
 		raw_spin_unlock(&mk_handlers_lock);
 
 		/* Advance tail to consume this message */
-		next_tail = (tail + 1) % MK_IPI_RING_SIZE;
-		atomic_set(&root_instance->ipi_data->ring.tail, next_tail);
+		mk_ipi_ring_release_slot(&root_instance->ipi_data->ring, slot, tail);
 
 		messages_processed++;
 
