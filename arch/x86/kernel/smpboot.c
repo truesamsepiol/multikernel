@@ -1128,6 +1128,19 @@ int multikernel_kick_ap(unsigned int cpu, unsigned long kernel_start_address)
 	return err;
 }
 
+/*
+ * Force a CPU running a multikernel instance into wait-for-SIPI, whatever
+ * it is executing (a panic loop with interrupts off included). Used to stop
+ * a crashed instance; the CPU comes back later through the usual INIT/SIPI
+ * sequence of add_cpu().
+ */
+void multikernel_send_init(u32 phys_apicid)
+{
+	preempt_disable();
+	send_init_sequence(phys_apicid);
+	preempt_enable();
+}
+
 void __init setup_trampolines_bsp(void)
 {
         phys_addr_t mem;
