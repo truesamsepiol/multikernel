@@ -1244,6 +1244,38 @@ int multikernel_halt_by_id(int mk_id)
 }
 
 /*
+ * Stop DMA from the PCI devices of a forcibly halted instance: they may
+ * still write into its memory, which the host reuses after delete (there
+ * is no IOMMU to contain them). The host driver re-enables bus mastering
+ * when mk_instance_return_pci_devices() binds it again.
+ */
+static void mk_instance_quiesce_pci_devices(struct mk_instance *instance)
+{
+	struct mk_pci_device *pci_dev;
+	struct pci_dev *dev;
+
+	if (!instance->pci_devices_valid)
+		return;
+
+	list_for_each_entry(pci_dev, &instance->pci_devices, list) {
+		dev = pci_get_domain_bus_and_slot(pci_dev->domain, pci_dev->bus,
+						  PCI_DEVFN(pci_dev->slot, pci_dev->func));
+		if (!dev) {
+			pr_warn("PCI device %04x:%02x:%02x.%d of instance %d not found, DMA not stopped\n",
+				pci_dev->domain, pci_dev->bus, pci_dev->slot,
+				pci_dev->func, instance->id);
+			continue;
+		}
+
+		pci_clear_master(dev);
+		pr_info("Stopped DMA of PCI device %04x:%02x:%02x.%d of instance %d\n",
+			pci_dev->domain, pci_dev->bus, pci_dev->slot,
+			pci_dev->func, instance->id);
+		pci_dev_put(dev);
+	}
+}
+
+/*
  * Stop an instance without its cooperation, e.g. after a panic: INIT puts
  * each of its CPUs into wait-for-SIPI whatever it is running. The instance
  * then goes back to LOADED as after a graceful halt, so that unload and
@@ -1271,6 +1303,9 @@ int multikernel_force_halt_by_id(int mk_id)
 		multikernel_send_init(phys_cpu);
 		count++;
 	}
+
+	/* CPUs first, then devices: nothing of the instance may touch memory */
+	mk_instance_quiesce_pci_devices(instance);
 
 	mk_instance_set_state(instance, MK_STATE_LOADED);
 	pr_warn("Multikernel instance %d forcibly halted: INIT sent to %d CPU(s) %*pbl\n",
