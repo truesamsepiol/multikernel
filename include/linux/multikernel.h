@@ -711,6 +711,7 @@ int mk_instance_set_kexec_active(int mk_id);
 void __init multikernel_flexmem_reserve(void);
 bool multikernel_allow_emergency_restart(void);
 int multikernel_halt_by_id(int mk_id);
+int multikernel_force_halt_by_id(int mk_id);
 //EO -> 2
 int multikernel_eo_write(const char *buf, size_t count);
 #else
@@ -722,6 +723,10 @@ static inline bool multikernel_allow_emergency_restart(void)
 	return true;
 }
 static inline int multikernel_halt_by_id(int mk_id)
+{
+	return -ENODEV;
+}
+static inline int multikernel_force_halt_by_id(int mk_id)
 {
 	return -ENODEV;
 }

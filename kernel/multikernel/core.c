@@ -1244,6 +1244,43 @@ int multikernel_halt_by_id(int mk_id)
 }
 
 /*
+ * Stop an instance without its cooperation, e.g. after a panic: INIT puts
+ * each of its CPUs into wait-for-SIPI whatever it is running. The instance
+ * then goes back to LOADED as after a graceful halt, so that unload and
+ * delete work, and add_cpu() later brings the CPUs back to the host.
+ */
+int multikernel_force_halt_by_id(int mk_id)
+{
+	struct mk_instance *instance;
+	int phys_cpu, count = 0;
+
+	instance = mk_instance_find(mk_id);
+	if (!instance)
+		return -ENOENT;
+
+	/* Never INIT the host's own CPUs */
+	if (instance == root_instance || instance->id == 0 ||
+	    instance->state != MK_STATE_ACTIVE ||
+	    !instance->cpus || bitmap_empty(instance->cpus, NR_CPUS)) {
+		mk_instance_put(instance);
+		return -EINVAL;
+	}
+
+	/* instance->cpus holds physical APIC IDs */
+	for_each_set_bit(phys_cpu, instance->cpus, NR_CPUS) {
+		multikernel_send_init(phys_cpu);
+		count++;
+	}
+
+	mk_instance_set_state(instance, MK_STATE_LOADED);
+	pr_warn("Multikernel instance %d forcibly halted: INIT sent to %d CPU(s) %*pbl\n",
+		mk_id, count, NR_CPUS, instance->cpus);
+
+	mk_instance_put(instance);
+	return 0;
+}
+
+/*
  * Each message gets its own sequence number, used as the pending/ACK key,
  * so that a late or out-of-order ACK cannot wake the wrong waiter. A lost
  * IPI or ACK is retried with the same sequence number, within the same
