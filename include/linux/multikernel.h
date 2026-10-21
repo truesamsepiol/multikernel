@@ -92,6 +92,7 @@ void multikernel_unregister_handler(struct mk_ipi_handler *handler);
 int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, unsigned long type);
 //EO -> 4
 int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size, unsigned long type);
+void multikernel_ipi_reclaim_stale_slots(void);
 
 void generic_multikernel_interrupt(void);
 

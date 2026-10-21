@@ -1307,6 +1307,9 @@ int multikernel_force_halt_by_id(int mk_id)
 	/* CPUs first, then devices: nothing of the instance may touch memory */
 	mk_instance_quiesce_pci_devices(instance);
 
+	/* A slot it claimed but never published would block the host ring */
+	multikernel_ipi_reclaim_stale_slots();
+
 	mk_instance_set_state(instance, MK_STATE_LOADED);
 	pr_warn("Multikernel instance %d forcibly halted: INIT sent to %d CPU(s) %*pbl\n",
 		mk_id, count, NR_CPUS, instance->cpus);

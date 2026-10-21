@@ -8,6 +8,7 @@
 #include <linux/smp.h>
 #include <linux/percpu.h>
 #include <linux/spinlock.h>
+#include <linux/delay.h>
 #include <linux/multikernel.h>
 #include <linux/kexec.h>
 #include <linux/io.h>
@@ -18,6 +19,8 @@
 /* Callback management */
 static struct mk_ipi_handler *mk_handlers;
 static raw_spinlock_t mk_handlers_lock = __RAW_SPIN_LOCK_UNLOCKED(mk_handlers_lock);
+/* Single consumer of the host ring: the IPI handler, or the stale slot reclaim */
+static DEFINE_RAW_SPINLOCK(mk_ring_consumer_lock);
 
 /* Private copy of a ring slot, queued on a handler until its irq_work runs */
 struct mk_ipi_msg {
@@ -131,6 +134,7 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 	struct mk_ipi_data *slot;
 	struct mk_instance *instance = mk_instance_find(instance_id);
 	unsigned int head, next_head, tail;
+	unsigned long flags;
 	int cpu;
 
 	if (!instance)
@@ -154,6 +158,13 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 		return -ENODEV;
 	}
 
+	/*
+	 * Claim, fill and publish with interrupts off: the window stays a few
+	 * microseconds, so a slot still unpublished long after its claim can
+	 * only belong to a dead producer (see multikernel_ipi_reclaim_stale_slots).
+	 */
+	local_irq_save(flags);
+
 	/* Try to enqueue the message in the ring buffer */
 	do {
 		head = atomic_read(&instance->ipi_data->ring.head);
@@ -162,6 +173,7 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 
 		/* Check if ring buffer is full */
 		if (next_head == tail) {
+			local_irq_restore(flags);
 			pr_warn("IPI ring buffer full for instance %d (head=%u, tail=%u)\n",
 				instance_id, head, tail);
 			mk_instance_put(instance);
@@ -189,6 +201,7 @@ int multikernel_send_ipi_data(int instance_id, void *data, size_t data_size, uns
 	 * The release orders all the writes above before the flag.
 	 */
 	smp_store_release(&slot->ready, 1);
+	local_irq_restore(flags);
 
 	cpu = find_first_bit(instance->cpus, NR_CPUS);
 
@@ -207,6 +220,7 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 	struct mk_ipi_data *slot;
 	struct mk_instance *instance = mk_instance_find(instance_id);
 	unsigned int head, next_head, tail;
+	unsigned long flags;
 	int cpu;
 
 	if (!instance)
@@ -223,6 +237,9 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 		return -ENODEV;
 	}
 
+	/* Publish window with interrupts off, see multikernel_send_ipi_data() */
+	local_irq_save(flags);
+
 	do {
 		head = atomic_read(&instance->ipi_data->ring.head);
 		next_head = (head + 1) % MK_IPI_RING_SIZE;
@@ -231,6 +248,7 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 			 instance_id, head, tail);
 
 		if (next_head == tail) {
+			local_irq_restore(flags);
 			pr_warn("IPI ring buffer full for instance %d (head=%u, tail=%u)\n",
 				instance_id, head, tail);
 			mk_instance_put(instance);
@@ -252,6 +270,7 @@ int multikernel_test_send_ipi_data(int instance_id, void *data, size_t data_size
 
 	/* Publish the slot, see multikernel_send_ipi_data() */
 	smp_store_release(&slot->ready, 1);
+	local_irq_restore(flags);
 
 	cpu = find_first_bit(instance->cpus, NR_CPUS);
 
@@ -292,6 +311,8 @@ static void multikernel_interrupt_handler(void)
 
 	if (!root_instance->ipi_data)
 		return;
+
+	raw_spin_lock(&mk_ring_consumer_lock);
 
 	/* Process all pending messages in the ring buffer */
 	while (1) {
@@ -366,10 +387,77 @@ static void multikernel_interrupt_handler(void)
 		}
 	}
 
+	raw_spin_unlock(&mk_ring_consumer_lock);
+
 	if (messages_processed > 0) {
 		pr_debug("Processed %d IPI message(s) on CPU %d\n",
 			 messages_processed, current_cpu);
 	}
+}
+
+/* A live producer publishes within microseconds (interrupts off) */
+#define MK_IPI_STALE_SLOT_MS	10
+
+static void mk_ipi_run_consumer(void)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	multikernel_interrupt_handler();
+	local_irq_restore(flags);
+}
+
+/**
+ * multikernel_ipi_reclaim_stale_slots - Unblock the host ring after a force halt
+ *
+ * A forcibly halted instance may have claimed a slot of the host ring (head
+ * moved) without publishing it (ready still 0). The consumer stops there,
+ * and every message queued behind it, from any instance, is stuck. A slot
+ * at tail that stays unpublished for MK_IPI_STALE_SLOT_MS while tail does
+ * not move has a dead producer: turn it into an empty message, which the
+ * consumer drops as invalid, and run the consumer. Must be called after the
+ * CPUs of the instance are stopped. May sleep.
+ */
+void multikernel_ipi_reclaim_stale_slots(void)
+{
+	struct mk_ipi_ring *ring;
+	struct mk_ipi_data *slot;
+	unsigned int tail;
+	int i, reclaimed = 0;
+
+	if (!root_instance || !root_instance->ipi_data)
+		return;
+
+	ring = &root_instance->ipi_data->ring;
+
+	for (i = 0; i < MK_IPI_RING_SIZE; i++) {
+		tail = atomic_read_acquire(&ring->tail);
+		if (tail == atomic_read(&ring->head))
+			break;
+
+		slot = &ring->entries[tail];
+		if (smp_load_acquire(&slot->ready)) {
+			/* Published but not consumed yet: let the consumer run */
+			mk_ipi_run_consumer();
+			continue;
+		}
+
+		msleep(MK_IPI_STALE_SLOT_MS);
+
+		/* The consumer moved on, or a live producer published it */
+		if (atomic_read_acquire(&ring->tail) != tail ||
+		    smp_load_acquire(&slot->ready))
+			continue;
+
+		slot->data_size = 0;
+		smp_store_release(&slot->ready, 1);
+		reclaimed++;
+		mk_ipi_run_consumer();
+	}
+
+	if (reclaimed)
+		pr_warn("Multikernel IPI: reclaimed %d stale slot(s) in the host ring\n",
+			reclaimed);
 }
 
 /**
