@@ -12,11 +12,14 @@
 #include <linux/mutex.h>
 #include <linux/delay.h>
 #include <linux/sched/signal.h>
+#include <linux/vmstat.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
 static phys_addr_t mk_flex_pool_size;
 static struct cma *mk_flex_cma;
+/* Pages of the pool currently held by instances (cma_alloc'ed) */
+static atomic_long_t mk_flex_instance_pages = ATOMIC_LONG_INIT(0);
 
 
 
@@ -182,6 +185,45 @@ void __init multikernel_flexmem_reserve(void)
 
 
 /*
+ * Explain why the pool could not provide a contiguous range. The pool
+ * holds three kinds of pages: those of the instances, free ones, and
+ * those lent to the host (CMA borrowing). Only lent pages can be pinned;
+ * free space split by instances or lent pages means fragmentation.
+ * NR_FREE_CMA_PAGES covers every CMA area, the flexible pool being the
+ * only one on multikernel hosts.
+ */
+static void multikernel_flexmem_report_failure(size_t size)
+{
+	unsigned long pool = cma_get_size(mk_flex_cma) >> PAGE_SHIFT;
+	unsigned long instances = atomic_long_read(&mk_flex_instance_pages);
+	unsigned long free = global_zone_page_state(NR_FREE_CMA_PAGES);
+	unsigned long lent = pool > instances + free ? pool - instances - free : 0;
+	int pct = cma_get_borrow_threshold();
+	char policy[16];
+
+	if (pct < 0)
+		strscpy(policy, "default", sizeof(policy));
+	else if (!pct)
+		strscpy(policy, "never", sizeof(policy));
+	else
+		snprintf(policy, sizeof(policy), "below %d%%", pct);
+
+	pr_err("EO_multikernel: cannot reserve %zu MB for an instance in the flexible CMA pool\n",
+	       size >> 20);
+	pr_err("EO_multikernel: pool %lu MB: instances %lu MB, free %lu MB, lent to the host %lu MB (borrow policy: %s)\n",
+	       pool >> (20 - PAGE_SHIFT), instances >> (20 - PAGE_SHIFT),
+	       free >> (20 - PAGE_SHIFT), lent >> (20 - PAGE_SHIFT), policy);
+
+	if (instances + (size >> PAGE_SHIFT) > pool)
+		pr_err("EO_multikernel: not enough room left in the pool for this instance\n");
+	/* Below a pageblock, lent is counter drift or per-cpu lists, not a cause */
+	else if (lent >= pageblock_nr_pages)
+		pr_err("EO_multikernel: pages lent to the host could not be migrated (pinned or in use); flex_borrow=never keeps the pool free for instances\n");
+	else
+		pr_err("EO_multikernel: no contiguous free range of that size, the pool is fragmented\n");
+}
+
+/*
  * A short-term pin (O_DIRECT I/O, a page under writeback) makes a range
  * unmigratable for a few milliseconds only: retry a couple of times after
  * a pause before giving up. Long-term pins never sit in CMA, gup moves
@@ -238,11 +280,16 @@ int multikernel_flexmem_acquire(size_t size, phys_addr_t *base)
 	}
 
 	if (!pages) {
-		pr_err("EO_multikernel: CMA allocation failed: size=%zu\n",
-		       size);
+		if (fatal_signal_pending(current)) {
+			pr_info("EO_multikernel: CMA allocation of %zu bytes interrupted\n",
+				size);
+			return -EINTR;
+		}
+		multikernel_flexmem_report_failure(size);
 		return -ENOMEM;
 	}
 
+	atomic_long_add(nr_pages, &mk_flex_instance_pages);
 	*base = page_to_phys(pages);
 
 	pr_info("EO_multikernel: acquired %zu bytes from flexible CMA: "
@@ -274,6 +321,8 @@ void multikernel_flexmem_release(phys_addr_t base, size_t size)
 		       "base=%pa size=%zu\n", &base, size);
 		return;
 	}
+
+	atomic_long_sub(nr_pages, &mk_flex_instance_pages);
 
 	pr_info("EO_multikernel: released %zu bytes to flexible CMA: "
 		"base=%pa\n", size, &base);
