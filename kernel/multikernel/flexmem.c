@@ -10,6 +10,8 @@
 #include <linux/genalloc.h>
 #include <linux/gfp.h>
 #include <linux/mutex.h>
+#include <linux/delay.h>
+#include <linux/sched/signal.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
@@ -179,11 +181,21 @@ void __init multikernel_flexmem_reserve(void)
 }
 
 
+/*
+ * A short-term pin (O_DIRECT I/O, a page under writeback) makes a range
+ * unmigratable for a few milliseconds only: retry a couple of times after
+ * a pause before giving up. Long-term pins never sit in CMA, gup moves
+ * those pages out when they are pinned.
+ */
+#define MK_FLEX_ACQUIRE_ATTEMPTS	3
+#define MK_FLEX_ACQUIRE_DELAY_MS	100
+
 int multikernel_flexmem_acquire(size_t size, phys_addr_t *base)
 {
-	struct page *pages;
+	struct page *pages = NULL;
 	unsigned long nr_pages;
 	unsigned int align_order;
+	int attempt;
 
 	if (!base)
 		return -EINVAL;
@@ -208,7 +220,23 @@ int multikernel_flexmem_acquire(size_t size, phys_addr_t *base)
 	 */
 	align_order = pageblock_order;
 
-	pages = cma_alloc(mk_flex_cma, nr_pages, align_order, false);
+	for (attempt = 1; attempt <= MK_FLEX_ACQUIRE_ATTEMPTS; attempt++) {
+		/* Only the last attempt lets CMA report its own failure */
+		pages = cma_alloc(mk_flex_cma, nr_pages, align_order,
+				  attempt < MK_FLEX_ACQUIRE_ATTEMPTS);
+		if (pages || attempt == MK_FLEX_ACQUIRE_ATTEMPTS)
+			break;
+
+		/* kerf was interrupted (Ctrl-C): do not keep it waiting */
+		if (fatal_signal_pending(current))
+			break;
+
+		pr_info("EO_multikernel: CMA allocation of %zu bytes failed (attempt %d/%d), retrying in %d ms\n",
+			size, attempt, MK_FLEX_ACQUIRE_ATTEMPTS,
+			MK_FLEX_ACQUIRE_DELAY_MS);
+		msleep(MK_FLEX_ACQUIRE_DELAY_MS);
+	}
+
 	if (!pages) {
 		pr_err("EO_multikernel: CMA allocation failed: size=%zu\n",
 		       size);
