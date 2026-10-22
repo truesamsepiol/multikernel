@@ -200,7 +200,13 @@ int multikernel_flexmem_acquire(size_t size, phys_addr_t *base)
 		return -EINVAL;
 
 	nr_pages = size >> PAGE_SHIFT;
-	align_order = 0;
+	/*
+	 * Start on a pageblock boundary. When a candidate range holds a page
+	 * that cannot be migrated (e.g. pinned), cma_alloc() retries at the
+	 * next aligned start: with order 0 that is one page further, i.e. up
+	 * to one full-size migration attempt per page of the request.
+	 */
+	align_order = pageblock_order;
 
 	pages = cma_alloc(mk_flex_cma, nr_pages, align_order, false);
 	if (!pages) {
