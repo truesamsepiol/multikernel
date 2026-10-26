@@ -14,6 +14,7 @@
 #include <linux/sched/signal.h>
 #include <linux/vmstat.h>
 #include <linux/seq_file.h>
+#include <linux/workqueue.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
@@ -184,9 +185,23 @@ void multikernel_flexmem_set_borrow(int pct)
  * may be lent to the host, whatever the borrow policy. Instance creation
  * is unchanged, cma_alloc() migrates the lent pages away. A request of 0
  * ends the host priority and the borrow policy applies again.
+ *
+ * Writing a request only records it and wakes the monitor up, a delayed
+ * work that handles it and then runs again every flex_reclaim_interval_ms.
+ * A new request replaces one still pending: only the latest need counts.
  */
+#define MK_FLEX_RECLAIM_INTERVAL_MS	100
+#define MK_FLEX_RECLAIM_INTERVAL_MIN_MS	10
+#define MK_FLEX_RECLAIM_INTERVAL_MAX_MS	60000
+
+static unsigned int mk_flex_reclaim_interval_ms = MK_FLEX_RECLAIM_INTERVAL_MS;
 static size_t mk_flex_reclaim_size;	/* last request, in bytes */
+static bool mk_flex_reclaim_pending;	/* not handled by the monitor yet */
 static int mk_flex_reclaim_result;	/* 0: granted, else why it was not */
+
+static void multikernel_flexmem_reclaim_monitor(struct work_struct *work);
+static DECLARE_DELAYED_WORK(mk_flex_reclaim_work,
+			    multikernel_flexmem_reclaim_monitor);
 
 static const char *multikernel_flexmem_reclaim_reason(int err)
 {
@@ -202,16 +217,12 @@ static const char *multikernel_flexmem_reclaim_reason(int err)
 	}
 }
 
-int multikernel_flexmem_reclaim(size_t size)
+/* Called by the monitor with mk_flex_borrow_mutex held */
+static void multikernel_flexmem_reclaim_process(size_t size)
 {
 	struct mk_flex_usage u;
 	unsigned long nr_pages = DIV_ROUND_UP(size, PAGE_SIZE);
 	int ret = 0;
-
-	if (!mk_flex_cma)
-		return -ENODEV;
-
-	mutex_lock(&mk_flex_borrow_mutex);
 
 	if (!size) {
 		bool was_on = cma_get_host_priority();
@@ -220,17 +231,13 @@ int multikernel_flexmem_reclaim(size_t size)
 		/* Same as a stricter policy: CMA pages left on per-cpu lists */
 		if (was_on && cma_get_borrow_threshold() >= 0)
 			drain_all_pages(NULL);
-		mk_flex_reclaim_size = 0;
 		mk_flex_reclaim_result = 0;
-		mutex_unlock(&mk_flex_borrow_mutex);
 		pr_info("EO_multikernel: host priority over the flexible CMA pool ended\n");
-		return 0;
+		return;
 	}
 
 	multikernel_flexmem_usage(&u);
-	if (nr_pages > u.pool) {
-		ret = -ENOSPC;
-	} else if (nr_pages > u.free) {
+	if (nr_pages > u.free) {
 		/* Free pages may sit on per-cpu lists, uncounted */
 		drain_all_pages(NULL);
 		multikernel_flexmem_usage(&u);
@@ -238,12 +245,9 @@ int multikernel_flexmem_reclaim(size_t size)
 			ret = -EBUSY;
 	}
 
-	mk_flex_reclaim_size = size;
 	mk_flex_reclaim_result = ret;
 	if (!ret)
 		cma_set_host_priority(true);
-
-	mutex_unlock(&mk_flex_borrow_mutex);
 
 	if (ret)
 		pr_warn("EO_multikernel: host reclaim of %zu MB %s (free %lu MB in the pool)\n",
@@ -252,8 +256,68 @@ int multikernel_flexmem_reclaim(size_t size)
 	else
 		pr_info("EO_multikernel: host reclaim of %zu MB granted, %lu MB free in the pool now lendable to the host\n",
 			size >> 20, u.free >> (20 - PAGE_SHIFT));
+}
 
-	return ret;
+static void multikernel_flexmem_reclaim_monitor(struct work_struct *work)
+{
+	mutex_lock(&mk_flex_borrow_mutex);
+	if (mk_flex_reclaim_pending) {
+		mk_flex_reclaim_pending = false;
+		multikernel_flexmem_reclaim_process(mk_flex_reclaim_size);
+	}
+	mutex_unlock(&mk_flex_borrow_mutex);
+
+	/* A request written meanwhile has already queued an immediate run */
+	queue_delayed_work(system_unbound_wq, &mk_flex_reclaim_work,
+			   msecs_to_jiffies(READ_ONCE(mk_flex_reclaim_interval_ms)));
+}
+
+int multikernel_flexmem_reclaim(size_t size)
+{
+	if (!mk_flex_cma)
+		return -ENODEV;
+
+	/* Known at once: even with every instance stopped it cannot fit */
+	if (DIV_ROUND_UP(size, PAGE_SIZE) > cma_get_size(mk_flex_cma) >> PAGE_SHIFT) {
+		mutex_lock(&mk_flex_borrow_mutex);
+		mk_flex_reclaim_size = size;
+		mk_flex_reclaim_pending = false;
+		mk_flex_reclaim_result = -ENOSPC;
+		mutex_unlock(&mk_flex_borrow_mutex);
+		pr_warn("EO_multikernel: host reclaim of %zu MB %s\n",
+			size >> 20, multikernel_flexmem_reclaim_reason(-ENOSPC));
+		return -ENOSPC;
+	}
+
+	mutex_lock(&mk_flex_borrow_mutex);
+	mk_flex_reclaim_size = size;
+	mk_flex_reclaim_pending = true;
+	mutex_unlock(&mk_flex_borrow_mutex);
+
+	/* Wake the monitor up now rather than at its next period */
+	mod_delayed_work(system_unbound_wq, &mk_flex_reclaim_work, 0);
+	return 0;
+}
+
+unsigned int multikernel_flexmem_reclaim_interval(void)
+{
+	return READ_ONCE(mk_flex_reclaim_interval_ms);
+}
+
+int multikernel_flexmem_set_reclaim_interval(unsigned int ms)
+{
+	if (ms < MK_FLEX_RECLAIM_INTERVAL_MIN_MS ||
+	    ms > MK_FLEX_RECLAIM_INTERVAL_MAX_MS)
+		return -EINVAL;
+
+	WRITE_ONCE(mk_flex_reclaim_interval_ms, ms);
+	/* The new period applies from now, not after the current one */
+	if (mk_flex_cma)
+		mod_delayed_work(system_unbound_wq, &mk_flex_reclaim_work,
+				 msecs_to_jiffies(ms));
+
+	pr_info("EO_multikernel: host reclaim monitor period set to %u ms\n", ms);
+	return 0;
 }
 
 void multikernel_flexmem_reclaim_show(struct seq_file *sf)
@@ -272,7 +336,10 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 
 	seq_printf(sf, "host priority: %s\n",
 		   cma_get_host_priority() ? "on" : "off");
-	if (mk_flex_reclaim_size)
+	if (mk_flex_reclaim_pending)
+		seq_printf(sf, "last request: %zu MB, pending\n",
+			   mk_flex_reclaim_size >> 20);
+	else if (mk_flex_reclaim_size)
 		seq_printf(sf, "last request: %zu MB, %s\n",
 			   mk_flex_reclaim_size >> 20,
 			   multikernel_flexmem_reclaim_reason(mk_flex_reclaim_result));
@@ -282,8 +349,24 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 		   u.pool >> (20 - PAGE_SHIFT), u.instances >> (20 - PAGE_SHIFT),
 		   u.free >> (20 - PAGE_SHIFT), u.lent >> (20 - PAGE_SHIFT));
 	seq_printf(sf, "borrow policy: %s\n", policy);
+	seq_printf(sf, "monitor period: %u ms\n",
+		   READ_ONCE(mk_flex_reclaim_interval_ms));
 	mutex_unlock(&mk_flex_borrow_mutex);
 }
+
+/* Workqueues are not up when the pool is declared: start the monitor here */
+static int __init multikernel_flexmem_monitor_init(void)
+{
+	if (!mk_flex_cma)
+		return 0;
+
+	queue_delayed_work(system_unbound_wq, &mk_flex_reclaim_work,
+			   msecs_to_jiffies(READ_ONCE(mk_flex_reclaim_interval_ms)));
+	pr_info("EO_multikernel: host reclaim monitor started, period %u ms\n",
+		READ_ONCE(mk_flex_reclaim_interval_ms));
+	return 0;
+}
+late_initcall(multikernel_flexmem_monitor_init);
 
 void __init multikernel_flexmem_reserve(void)
 {

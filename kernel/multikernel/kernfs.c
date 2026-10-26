@@ -217,6 +217,31 @@ static const struct kernfs_ops mk_flex_reclaim_ops = {
 	.write = flex_reclaim_write,
 };
 
+/* Root-level flex_reclaim_interval_ms attribute - period of the reclaim monitor */
+static int flex_reclaim_interval_seq_show(struct seq_file *sf, void *v)
+{
+	seq_printf(sf, "%u\n", multikernel_flexmem_reclaim_interval());
+	return 0;
+}
+
+static ssize_t flex_reclaim_interval_write(struct kernfs_open_file *of, char *buf,
+					   size_t count, loff_t off)
+{
+	unsigned int ms;
+	int ret;
+
+	if (kstrtouint(strim(buf), 10, &ms))
+		return -EINVAL;
+
+	ret = multikernel_flexmem_set_reclaim_interval(ms);
+	return ret ? ret : count;
+}
+
+static const struct kernfs_ops mk_flex_reclaim_interval_ops = {
+	.seq_show = flex_reclaim_interval_seq_show,
+	.write = flex_reclaim_interval_write,
+};
+
 /* Root-level device_tree attribute - shows current baseline pool from kernel structures */
 static int root_device_tree_seq_show(struct seq_file *sf, void *v)
 {
@@ -698,6 +723,17 @@ int mk_kernfs_init(void)
 	if (IS_ERR(flex_reclaim_kn)) {
 		ret = PTR_ERR(flex_reclaim_kn);
 		pr_err("Failed to create root flex_reclaim file: %d\n", ret);
+		kernfs_destroy_root(mk_kernfs_root);
+		return ret;
+	}
+
+	struct kernfs_node *flex_reclaim_interval_kn = __kernfs_create_file(mk_root_kn,
+								"flex_reclaim_interval_ms", 0644,
+								GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+								&mk_flex_reclaim_interval_ops, NULL, NULL, NULL);
+	if (IS_ERR(flex_reclaim_interval_kn)) {
+		ret = PTR_ERR(flex_reclaim_interval_kn);
+		pr_err("Failed to create root flex_reclaim_interval_ms file: %d\n", ret);
 		kernfs_destroy_root(mk_kernfs_root);
 		return ret;
 	}

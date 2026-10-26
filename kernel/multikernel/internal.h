@@ -48,3 +48,5 @@ int multikernel_flexmem_parse_borrow(const char *str, int *pct);
 void multikernel_flexmem_set_borrow(int pct);
 int multikernel_flexmem_reclaim(size_t size);
 void multikernel_flexmem_reclaim_show(struct seq_file *sf);
+unsigned int multikernel_flexmem_reclaim_interval(void);
+int multikernel_flexmem_set_reclaim_interval(unsigned int ms);
