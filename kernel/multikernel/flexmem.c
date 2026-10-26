@@ -13,6 +13,7 @@
 #include <linux/delay.h>
 #include <linux/sched/signal.h>
 #include <linux/vmstat.h>
+#include <linux/seq_file.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
@@ -20,6 +21,38 @@ static phys_addr_t mk_flex_pool_size;
 static struct cma *mk_flex_cma;
 /* Pages of the pool currently held by instances (cma_alloc'ed) */
 static atomic_long_t mk_flex_instance_pages = ATOMIC_LONG_INIT(0);
+
+/*
+ * State of the pool. NR_FREE_CMA_PAGES covers every CMA area, the
+ * flexible pool being the only one on multikernel hosts.
+ */
+struct mk_flex_usage {
+	unsigned long pool;
+	unsigned long instances;
+	unsigned long free;
+	unsigned long lent;
+};
+
+static void multikernel_flexmem_usage(struct mk_flex_usage *u)
+{
+	u->pool = cma_get_size(mk_flex_cma) >> PAGE_SHIFT;
+	u->instances = atomic_long_read(&mk_flex_instance_pages);
+	u->free = global_zone_page_state(NR_FREE_CMA_PAGES);
+	u->lent = u->pool > u->instances + u->free ?
+		  u->pool - u->instances - u->free : 0;
+}
+
+static void multikernel_flexmem_policy_name(char *buf, size_t len)
+{
+	int pct = cma_get_borrow_threshold();
+
+	if (pct < 0)
+		strscpy(buf, "default", len);
+	else if (!pct)
+		strscpy(buf, "never", len);
+	else
+		snprintf(buf, len, "below %d%%", pct);
+}
 
 
 
@@ -144,6 +177,114 @@ void multikernel_flexmem_set_borrow(int pct)
 	multikernel_flexmem_log_borrow(pct);
 }
 
+/*
+ * Host reclaim of the flexible pool (flex_reclaim file). The host has
+ * priority over the whole pool: a request of @size bytes says the host
+ * needs that much memory, and once granted every free page of the pool
+ * may be lent to the host, whatever the borrow policy. Instance creation
+ * is unchanged, cma_alloc() migrates the lent pages away. A request of 0
+ * ends the host priority and the borrow policy applies again.
+ */
+static size_t mk_flex_reclaim_size;	/* last request, in bytes */
+static int mk_flex_reclaim_result;	/* 0: granted, else why it was not */
+
+static const char *multikernel_flexmem_reclaim_reason(int err)
+{
+	switch (err) {
+	case 0:
+		return "granted";
+	case -ENOSPC:
+		return "refused: larger than the pool";
+	case -EBUSY:
+		return "refused: not enough free memory in the pool";
+	default:
+		return "refused";
+	}
+}
+
+int multikernel_flexmem_reclaim(size_t size)
+{
+	struct mk_flex_usage u;
+	unsigned long nr_pages = DIV_ROUND_UP(size, PAGE_SIZE);
+	int ret = 0;
+
+	if (!mk_flex_cma)
+		return -ENODEV;
+
+	mutex_lock(&mk_flex_borrow_mutex);
+
+	if (!size) {
+		bool was_on = cma_get_host_priority();
+
+		cma_set_host_priority(false);
+		/* Same as a stricter policy: CMA pages left on per-cpu lists */
+		if (was_on && cma_get_borrow_threshold() >= 0)
+			drain_all_pages(NULL);
+		mk_flex_reclaim_size = 0;
+		mk_flex_reclaim_result = 0;
+		mutex_unlock(&mk_flex_borrow_mutex);
+		pr_info("EO_multikernel: host priority over the flexible CMA pool ended\n");
+		return 0;
+	}
+
+	multikernel_flexmem_usage(&u);
+	if (nr_pages > u.pool) {
+		ret = -ENOSPC;
+	} else if (nr_pages > u.free) {
+		/* Free pages may sit on per-cpu lists, uncounted */
+		drain_all_pages(NULL);
+		multikernel_flexmem_usage(&u);
+		if (nr_pages > u.free)
+			ret = -EBUSY;
+	}
+
+	mk_flex_reclaim_size = size;
+	mk_flex_reclaim_result = ret;
+	if (!ret)
+		cma_set_host_priority(true);
+
+	mutex_unlock(&mk_flex_borrow_mutex);
+
+	if (ret)
+		pr_warn("EO_multikernel: host reclaim of %zu MB %s (free %lu MB in the pool)\n",
+			size >> 20, multikernel_flexmem_reclaim_reason(ret),
+			u.free >> (20 - PAGE_SHIFT));
+	else
+		pr_info("EO_multikernel: host reclaim of %zu MB granted, %lu MB free in the pool now lendable to the host\n",
+			size >> 20, u.free >> (20 - PAGE_SHIFT));
+
+	return ret;
+}
+
+void multikernel_flexmem_reclaim_show(struct seq_file *sf)
+{
+	struct mk_flex_usage u;
+	char policy[16];
+
+	if (!mk_flex_cma) {
+		seq_puts(sf, "no flexible pool\n");
+		return;
+	}
+
+	mutex_lock(&mk_flex_borrow_mutex);
+	multikernel_flexmem_usage(&u);
+	multikernel_flexmem_policy_name(policy, sizeof(policy));
+
+	seq_printf(sf, "host priority: %s\n",
+		   cma_get_host_priority() ? "on" : "off");
+	if (mk_flex_reclaim_size)
+		seq_printf(sf, "last request: %zu MB, %s\n",
+			   mk_flex_reclaim_size >> 20,
+			   multikernel_flexmem_reclaim_reason(mk_flex_reclaim_result));
+	else
+		seq_puts(sf, "last request: none\n");
+	seq_printf(sf, "pool: %lu MB, instances %lu MB, free %lu MB, lent to the host %lu MB\n",
+		   u.pool >> (20 - PAGE_SHIFT), u.instances >> (20 - PAGE_SHIFT),
+		   u.free >> (20 - PAGE_SHIFT), u.lent >> (20 - PAGE_SHIFT));
+	seq_printf(sf, "borrow policy: %s\n", policy);
+	mutex_unlock(&mk_flex_borrow_mutex);
+}
+
 void __init multikernel_flexmem_reserve(void)
 {
 	int ret;
@@ -194,19 +335,16 @@ void __init multikernel_flexmem_reserve(void)
  */
 static void multikernel_flexmem_report_failure(size_t size)
 {
-	unsigned long pool = cma_get_size(mk_flex_cma) >> PAGE_SHIFT;
-	unsigned long instances = atomic_long_read(&mk_flex_instance_pages);
-	unsigned long free = global_zone_page_state(NR_FREE_CMA_PAGES);
-	unsigned long lent = pool > instances + free ? pool - instances - free : 0;
-	int pct = cma_get_borrow_threshold();
+	struct mk_flex_usage u;
+	unsigned long pool, instances, free, lent;
 	char policy[16];
 
-	if (pct < 0)
-		strscpy(policy, "default", sizeof(policy));
-	else if (!pct)
-		strscpy(policy, "never", sizeof(policy));
-	else
-		snprintf(policy, sizeof(policy), "below %d%%", pct);
+	multikernel_flexmem_usage(&u);
+	pool = u.pool;
+	instances = u.instances;
+	free = u.free;
+	lent = u.lent;
+	multikernel_flexmem_policy_name(policy, sizeof(policy));
 
 	pr_err("EO_multikernel: cannot reserve %zu MB for an instance in the flexible CMA pool\n",
 	       size >> 20);

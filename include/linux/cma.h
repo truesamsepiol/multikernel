@@ -71,6 +71,8 @@ bool cma_free_folio(struct cma *cma, const struct folio *folio);
 bool cma_validate_zones(struct cma *cma);
 void cma_set_borrow_threshold(int pct);
 int cma_get_borrow_threshold(void);
+void cma_set_host_priority(bool on);
+bool cma_get_host_priority(void);
 #else
 static inline void cma_set_borrow_threshold(int pct)
 {
@@ -79,6 +81,15 @@ static inline void cma_set_borrow_threshold(int pct)
 static inline int cma_get_borrow_threshold(void)
 {
 	return CMA_BORROW_DEFAULT;
+}
+
+static inline void cma_set_host_priority(bool on)
+{
+}
+
+static inline bool cma_get_host_priority(void)
+{
+	return false;
 }
 
 static inline struct folio *cma_alloc_folio(struct cma *cma, int order, gfp_t gfp)

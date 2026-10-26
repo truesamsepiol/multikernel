@@ -3721,6 +3721,22 @@ int cma_get_borrow_threshold(void)
 }
 
 /*
+ * Host priority: set while the host reclaims the CMA memory. Every free
+ * CMA page may then be lent, whatever the threshold policy says.
+ */
+static bool cma_host_priority __read_mostly;
+
+void cma_set_host_priority(bool on)
+{
+	WRITE_ONCE(cma_host_priority, on);
+}
+
+bool cma_get_host_priority(void)
+{
+	return READ_ONCE(cma_host_priority);
+}
+
+/*
  * Decide whether movable allocations may be served from CMA pageblocks.
  * Only lock-free global counters are read, as this runs in the fast path.
  */
@@ -3730,6 +3746,8 @@ static inline bool cma_borrow_allowed(void)
 	unsigned long free_pages, free_cma, normal_free, normal_total;
 
 	if (likely(pct < 0))
+		return true;
+	if (READ_ONCE(cma_host_priority))
 		return true;
 	if (!pct)
 		return false;

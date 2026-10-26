@@ -188,6 +188,35 @@ static const struct kernfs_ops mk_flex_borrow_ops = {
 	.write = flex_borrow_write,
 };
 
+/* Root-level flex_reclaim attribute - host reclaim of the flexible pool */
+static int flex_reclaim_seq_show(struct seq_file *sf, void *v)
+{
+	multikernel_flexmem_reclaim_show(sf);
+	return 0;
+}
+
+static ssize_t flex_reclaim_write(struct kernfs_open_file *of, char *buf,
+				  size_t count, loff_t off)
+{
+	char *str = strim(buf), *end;
+	unsigned long long size;
+	int ret;
+
+	if (!*str)
+		return -EINVAL;
+	size = memparse(str, &end);
+	if (*end)
+		return -EINVAL;
+
+	ret = multikernel_flexmem_reclaim(size);
+	return ret ? ret : count;
+}
+
+static const struct kernfs_ops mk_flex_reclaim_ops = {
+	.seq_show = flex_reclaim_seq_show,
+	.write = flex_reclaim_write,
+};
+
 /* Root-level device_tree attribute - shows current baseline pool from kernel structures */
 static int root_device_tree_seq_show(struct seq_file *sf, void *v)
 {
@@ -659,6 +688,16 @@ int mk_kernfs_init(void)
 	if (IS_ERR(flex_borrow_kn)) {
 		ret = PTR_ERR(flex_borrow_kn);
 		pr_err("Failed to create root flex_borrow file: %d\n", ret);
+		kernfs_destroy_root(mk_kernfs_root);
+		return ret;
+	}
+
+	struct kernfs_node *flex_reclaim_kn = __kernfs_create_file(mk_root_kn, "flex_reclaim", 0644,
+								    GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+								    &mk_flex_reclaim_ops, NULL, NULL, NULL);
+	if (IS_ERR(flex_reclaim_kn)) {
+		ret = PTR_ERR(flex_reclaim_kn);
+		pr_err("Failed to create root flex_reclaim file: %d\n", ret);
 		kernfs_destroy_root(mk_kernfs_root);
 		return ret;
 	}

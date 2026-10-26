@@ -36,6 +36,7 @@ int mk_baseline_validate_and_initialize(const void *fdt, size_t fdt_size);
 void mk_baseline_clear_resources(struct mk_instance *instance);
 
 //EO -> flex_pool
+struct seq_file;
 bool multikernel_flexmem_enabled(void);
 int multikernel_flexmem_create_instance_pool(int instance_id, size_t pool_size, int min_alloc_order,
 					      void **pool_handle, phys_addr_t *base);
@@ -45,3 +46,5 @@ void multikernel_flexmem_release(phys_addr_t base, size_t size);
 size_t multikernel_flexmem_size(void);
 int multikernel_flexmem_parse_borrow(const char *str, int *pct);
 void multikernel_flexmem_set_borrow(int pct);
+int multikernel_flexmem_reclaim(size_t size);
+void multikernel_flexmem_reclaim_show(struct seq_file *sf);
