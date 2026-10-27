@@ -569,8 +569,13 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 		/* Free pages may sit on per-cpu lists, uncounted */
 		drain_all_pages(NULL);
 		multikernel_flexmem_usage(&u);
-		if (nr_pages > u.free)
+		if (nr_pages > u.free) {
+			pr_info("EO_multikernel: host reclaim of %zu MB (%s): free %lu MB in the pool, %lu MB missing, choosing victims\n",
+				size >> 20, mk_flex_reclaim_policy->name,
+				u.free >> (20 - PAGE_SHIFT),
+				(nr_pages - u.free) >> (20 - PAGE_SHIFT));
 			ret = multikernel_flexmem_select_victims(nr_pages - u.free);
+		}
 	}
 
 	/*
