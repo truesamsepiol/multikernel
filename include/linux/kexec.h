@@ -451,6 +451,7 @@ extern int machine_kexec_prepare(struct kimage *image);
 extern void machine_kexec_cleanup(struct kimage *image);
 extern int kernel_kexec(void);
 extern int multikernel_kexec_by_id(int mk_id);
+extern int multikernel_kexec_unload_by_id(int mk_id);
 extern struct kimage *kimage_find_by_id(int mk_id);
 extern struct page *kimage_alloc_control_pages(struct kimage *image,
 						unsigned int order);

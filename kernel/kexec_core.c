@@ -1523,6 +1523,30 @@ struct kimage *kimage_find_by_id(int mk_id)
 	return image;
 }
 
+/*
+ * Unload the kernel of a multikernel instance, as KEXEC_FILE_UNLOAD does.
+ * Used by the host reclaim of the flexible pool. Returns 0 when done or
+ * when nothing is loaded, -EBUSY while another kexec operation runs.
+ */
+int multikernel_kexec_unload_by_id(int mk_id)
+{
+	struct kimage *mk_image;
+
+	if (!kexec_trylock())
+		return -EBUSY;
+
+	mk_image = kimage_find_by_id(mk_id);
+	if (mk_image) {
+		pr_info("Unloading kernel from multikernel instance %d\n", mk_id);
+		kimage_remove_from_list(mk_image);
+	}
+
+	kexec_unlock();
+	/* As kexec_file_load(): freed outside the lock, back to READY */
+	kimage_free(mk_image);
+	return 0;
+}
+
 int multikernel_kexec_by_id(int mk_id)
 {
 	struct kimage *mk_image;
