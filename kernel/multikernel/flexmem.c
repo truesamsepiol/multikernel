@@ -19,6 +19,8 @@
 #include <linux/sort.h>
 #include <linux/kexec.h>
 #include <linux/suspend.h>
+#include <linux/kernfs.h>
+#include <linux/timekeeping.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
@@ -307,6 +309,36 @@ static struct mk_flex_victim mk_flex_victims[MK_FLEX_MAX_VICTIMS];
 static int mk_flex_nr_victims;
 static bool mk_flex_victims_chosen;	/* for the current request */
 
+/*
+ * Instances deleted by host reclaims, for kerf: the 16 last ones, read in
+ * flex_reclaimed. The file is notified on each deletion (poll()).
+ */
+#define MK_FLEX_HISTORY		16
+struct mk_flex_reclaimed {
+	struct mk_flex_candidate c;
+	time64_t when;			/* seconds since the epoch */
+	const char *policy;
+};
+static struct mk_flex_reclaimed mk_flex_history[MK_FLEX_HISTORY];
+static unsigned int mk_flex_history_count;	/* ever recorded */
+static struct kernfs_node *mk_flex_reclaimed_kn;
+
+static void multikernel_flexmem_record_reclaimed(struct mk_flex_candidate *c,
+						 const char *policy)
+{
+	struct mk_flex_reclaimed *r;
+
+	lockdep_assert_held(&mk_flex_borrow_mutex);
+
+	r = &mk_flex_history[mk_flex_history_count++ % MK_FLEX_HISTORY];
+	r->c = *c;
+	r->when = ktime_get_real_seconds();
+	r->policy = policy;
+
+	if (mk_flex_reclaimed_kn)
+		kernfs_notify(mk_flex_reclaimed_kn);
+}
+
 static void multikernel_flexmem_reclaim_monitor(struct work_struct *work);
 static DECLARE_DELAYED_WORK(mk_flex_reclaim_work,
 			    multikernel_flexmem_reclaim_monitor);
@@ -471,6 +503,7 @@ static int multikernel_flexmem_remove_victim(struct mk_flex_candidate *c,
 	if (ret)
 		return ret;
 
+	multikernel_flexmem_record_reclaimed(c, policy);
 	pr_warn("EO_multikernel: host reclaim (%s): instance %d (%s, %lu MB, %s) stopped and deleted\n",
 		policy, c->id, c->name, c->pages >> (20 - PAGE_SHIFT),
 		mk_state_to_string(c->state));
@@ -687,6 +720,31 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 	for (i = 0; i < ARRAY_SIZE(mk_flex_policies); i++)
 		seq_printf(sf, i ? " %s" : " [%s]", mk_flex_policies[i].name);
 	seq_putc(sf, '\n');
+	mutex_unlock(&mk_flex_borrow_mutex);
+}
+
+/* One line per deleted instance, oldest first: id name MB time policy state */
+void multikernel_flexmem_reclaimed_show(struct seq_file *sf)
+{
+	unsigned int i, first;
+
+	mutex_lock(&mk_flex_borrow_mutex);
+	first = mk_flex_history_count > MK_FLEX_HISTORY ?
+		mk_flex_history_count - MK_FLEX_HISTORY : 0;
+	for (i = first; i < mk_flex_history_count; i++) {
+		struct mk_flex_reclaimed *r = &mk_flex_history[i % MK_FLEX_HISTORY];
+
+		seq_printf(sf, "%d %s %lu %lld %s %s\n", r->c.id, r->c.name,
+			   r->c.pages >> (20 - PAGE_SHIFT), (long long)r->when,
+			   r->policy, mk_state_to_string(r->c.state));
+	}
+	mutex_unlock(&mk_flex_borrow_mutex);
+}
+
+void multikernel_flexmem_set_reclaimed_node(struct kernfs_node *kn)
+{
+	mutex_lock(&mk_flex_borrow_mutex);
+	mk_flex_reclaimed_kn = kn;
 	mutex_unlock(&mk_flex_borrow_mutex);
 }
 

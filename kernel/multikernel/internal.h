@@ -37,6 +37,7 @@ void mk_baseline_clear_resources(struct mk_instance *instance);
 
 //EO -> flex_pool
 struct seq_file;
+struct kernfs_node;
 bool multikernel_flexmem_enabled(void);
 int multikernel_flexmem_create_instance_pool(int instance_id, size_t pool_size, int min_alloc_order,
 					      void **pool_handle, phys_addr_t *base);
@@ -65,3 +66,5 @@ int multikernel_flexmem_reclaim(size_t size, const char *policy_name);
 void multikernel_flexmem_reclaim_show(struct seq_file *sf);
 unsigned int multikernel_flexmem_reclaim_interval(void);
 int multikernel_flexmem_set_reclaim_interval(unsigned int ms);
+void multikernel_flexmem_reclaimed_show(struct seq_file *sf);
+void multikernel_flexmem_set_reclaimed_node(struct kernfs_node *kn);

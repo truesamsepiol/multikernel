@@ -249,6 +249,17 @@ static const struct kernfs_ops mk_flex_reclaim_interval_ops = {
 	.write = flex_reclaim_interval_write,
 };
 
+/* Root-level flex_reclaimed attribute - instances deleted by host reclaims */
+static int flex_reclaimed_seq_show(struct seq_file *sf, void *v)
+{
+	multikernel_flexmem_reclaimed_show(sf);
+	return 0;
+}
+
+static const struct kernfs_ops mk_flex_reclaimed_ops = {
+	.seq_show = flex_reclaimed_seq_show,
+};
+
 /* Root-level device_tree attribute - shows current baseline pool from kernel structures */
 static int root_device_tree_seq_show(struct seq_file *sf, void *v)
 {
@@ -744,6 +755,17 @@ int mk_kernfs_init(void)
 		kernfs_destroy_root(mk_kernfs_root);
 		return ret;
 	}
+
+	struct kernfs_node *flex_reclaimed_kn = __kernfs_create_file(mk_root_kn, "flex_reclaimed", 0444,
+								     GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+								     &mk_flex_reclaimed_ops, NULL, NULL, NULL);
+	if (IS_ERR(flex_reclaimed_kn)) {
+		ret = PTR_ERR(flex_reclaimed_kn);
+		pr_err("Failed to create root flex_reclaimed file: %d\n", ret);
+		kernfs_destroy_root(mk_kernfs_root);
+		return ret;
+	}
+	multikernel_flexmem_set_reclaimed_node(flex_reclaimed_kn);
 
 	/* Register the filesystem */
 	ret = register_filesystem(&mk_fs_type);
