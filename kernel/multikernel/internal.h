@@ -52,6 +52,7 @@ struct mk_flex_candidate {
 	int id;
 	char name[32];
 	unsigned long pages;	/* pool pages held */
+	enum mk_instance_state state;
 	bool victim;		/* set by the policy */
 };
 

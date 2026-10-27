@@ -17,6 +17,8 @@
 #include <linux/workqueue.h>
 #include <linux/slab.h>
 #include <linux/sort.h>
+#include <linux/kexec.h>
+#include <linux/suspend.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
@@ -193,7 +195,9 @@ void multikernel_flexmem_set_borrow(int pct)
  * A new request replaces one still pending: only the latest need counts.
  *
  * When the pool has not enough free pages, a policy picks the instances
- * to stop (victims) until their memory covers what is missing.
+ * to stop (victims) until their memory covers what is missing. They are
+ * chosen once per request, then stopped and deleted at once (INIT, no
+ * graceful halt), as kerf kill --force, unload and delete would do.
  */
 
 /*
@@ -295,8 +299,13 @@ static int mk_flex_reclaim_result;	/* 0: granted, else why it was not */
 
 /* Victims chosen for the last request */
 #define MK_FLEX_MAX_VICTIMS	32
-static struct mk_flex_candidate mk_flex_victims[MK_FLEX_MAX_VICTIMS];
+struct mk_flex_victim {
+	struct mk_flex_candidate c;
+	bool done;		/* stopped and deleted */
+};
+static struct mk_flex_victim mk_flex_victims[MK_FLEX_MAX_VICTIMS];
 static int mk_flex_nr_victims;
+static bool mk_flex_victims_chosen;	/* for the current request */
 
 static void multikernel_flexmem_reclaim_monitor(struct work_struct *work);
 static DECLARE_DELAYED_WORK(mk_flex_reclaim_work,
@@ -314,7 +323,7 @@ static const char *multikernel_flexmem_reclaim_reason(int err)
 	case -ENOMEM:
 		return "refused: the policy did not select enough victims";
 	case -EAGAIN:
-		return "victims selected (simulation: not stopped)";
+		return "pending, stopping the victims";
 	default:
 		return "refused";
 	}
@@ -347,6 +356,7 @@ static int multikernel_flexmem_candidates(struct mk_flex_candidate **out)
 		cand[i].id = instance->id;
 		strscpy(cand[i].name, instance->name ?: "", sizeof(cand[i].name));
 		cand[i].pages = instance->flexmem_size >> PAGE_SHIFT;
+		cand[i].state = instance->state;
 		i++;
 	}
 	mutex_unlock(&mk_instance_mutex);
@@ -357,8 +367,8 @@ static int multikernel_flexmem_candidates(struct mk_flex_candidate **out)
 
 /*
  * The pool lacks @missing free pages: let the policy of the request pick
- * the instances to stop. Simulation for now, the victims are only logged.
- * Called by the monitor with mk_flex_borrow_mutex held.
+ * the instances to stop. Called by the monitor with mk_flex_borrow_mutex
+ * held.
  */
 static int multikernel_flexmem_select_victims(unsigned long missing)
 {
@@ -385,8 +395,14 @@ static int multikernel_flexmem_select_victims(unsigned long missing)
 		if (!cand[i].victim)
 			continue;
 		got += cand[i].pages;
-		if (mk_flex_nr_victims < MK_FLEX_MAX_VICTIMS)
-			mk_flex_victims[mk_flex_nr_victims++] = cand[i];
+		/* Each victim must be recorded to be stopped */
+		if (mk_flex_nr_victims == MK_FLEX_MAX_VICTIMS) {
+			got = 0;
+			break;
+		}
+		mk_flex_victims[mk_flex_nr_victims].c = cand[i];
+		mk_flex_victims[mk_flex_nr_victims].done = false;
+		mk_flex_nr_victims++;
 	}
 	if (got < missing) {
 		mk_flex_nr_victims = 0;
@@ -394,14 +410,103 @@ static int multikernel_flexmem_select_victims(unsigned long missing)
 		goto out;
 	}
 
-	for (i = 0; i < mk_flex_nr_victims; i++)
-		pr_info("EO_multikernel: host reclaim (%s): would stop instance %d (%s, %lu MB)\n",
-			policy->name, mk_flex_victims[i].id, mk_flex_victims[i].name,
-			mk_flex_victims[i].pages >> (20 - PAGE_SHIFT));
-	ret = -EAGAIN;
+	mk_flex_victims_chosen = true;
+	ret = 0;
 out:
 	kfree(cand);
 	return ret;
+}
+
+/* The instance @c still exists: same id and same name as when chosen */
+static struct mk_instance *mk_flex_victim_lookup(struct mk_flex_candidate *c)
+{
+	struct mk_instance *instance;
+
+	lockdep_assert_held(&mk_instance_mutex);
+
+	instance = idr_find(&mk_instance_idr, c->id);
+	if (instance && strcmp(instance->name ?: "", c->name))
+		return NULL;
+	return instance;
+}
+
+/*
+ * Stop and delete one victim, as kerf kill --force, unload and delete:
+ * INIT if it runs, then unload its kernel, then delete it. The pool
+ * memory goes back to CMA when its last reference is dropped.
+ */
+static int multikernel_flexmem_remove_victim(struct mk_flex_candidate *c,
+					     const char *policy)
+{
+	struct mk_instance *instance;
+	enum mk_instance_state state;
+	int ret;
+
+	mutex_lock(&mk_instance_mutex);
+	instance = mk_flex_victim_lookup(c);
+	state = instance ? instance->state : MK_STATE_EMPTY;
+	mutex_unlock(&mk_instance_mutex);
+
+	/* Deleted meanwhile (kerf delete): its memory is coming back anyway */
+	if (!instance) {
+		pr_info("EO_multikernel: host reclaim (%s): instance %d (%s) already gone\n",
+			policy, c->id, c->name);
+		return 0;
+	}
+
+	if (state == MK_STATE_ACTIVE) {
+		ret = multikernel_force_halt_by_id(c->id);
+		if (ret)
+			return ret;
+	}
+
+	ret = multikernel_kexec_unload_by_id(c->id);
+	if (ret)
+		return ret;
+
+	mutex_lock(&mk_instance_mutex);
+	instance = mk_flex_victim_lookup(c);
+	ret = instance ? mk_instance_destroy(instance) : 0;
+	mutex_unlock(&mk_instance_mutex);
+	if (ret)
+		return ret;
+
+	pr_warn("EO_multikernel: host reclaim (%s): instance %d (%s, %lu MB, %s) stopped and deleted\n",
+		policy, c->id, c->name, c->pages >> (20 - PAGE_SHIFT),
+		mk_state_to_string(c->state));
+	return 0;
+}
+
+/*
+ * Stop the victims not done yet. system_transition_mutex serializes with
+ * kerf start and kill, and is only tried, as the kexec lock: the monitor
+ * never waits on kerf, it retries at its next period (-EAGAIN).
+ */
+static int multikernel_flexmem_remove_victims(const char *policy)
+{
+	int i, ret = 0;
+
+	if (!mutex_trylock(&system_transition_mutex))
+		return -EAGAIN;
+
+	for (i = 0; i < mk_flex_nr_victims; i++) {
+		if (mk_flex_victims[i].done)
+			continue;
+		ret = multikernel_flexmem_remove_victim(&mk_flex_victims[i].c, policy);
+		if (ret)
+			break;
+		mk_flex_victims[i].done = true;
+	}
+
+	mutex_unlock(&system_transition_mutex);
+
+	if (ret) {
+		pr_warn_ratelimited("EO_multikernel: host reclaim (%s): cannot stop instance %d (%s) yet: %d, retrying\n",
+				    policy, mk_flex_victims[i].c.id,
+				    mk_flex_victims[i].c.name, ret);
+		return -EAGAIN;
+	}
+	return 0;
 }
 
 /* Called by the monitor with mk_flex_borrow_mutex held */
@@ -418,14 +523,16 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 		/* Same as a stricter policy: CMA pages left on per-cpu lists */
 		if (was_on && cma_get_borrow_threshold() >= 0)
 			drain_all_pages(NULL);
+		mk_flex_nr_victims = 0;
+		mk_flex_victims_chosen = false;
 		mk_flex_reclaim_result = 0;
 		pr_info("EO_multikernel: host priority over the flexible CMA pool ended\n");
 		return;
 	}
 
-	mk_flex_nr_victims = 0;
 	multikernel_flexmem_usage(&u);
-	if (nr_pages > u.free) {
+	/* Victims are chosen once: a retry only stops the remaining ones */
+	if (!mk_flex_victims_chosen && nr_pages > u.free) {
 		/* Free pages may sit on per-cpu lists, uncounted */
 		drain_all_pages(NULL);
 		multikernel_flexmem_usage(&u);
@@ -433,7 +540,20 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 			ret = multikernel_flexmem_select_victims(nr_pages - u.free);
 	}
 
+	/*
+	 * Once its victims are deleted the request is granted, without
+	 * waiting for their memory: an instance still referenced (an open
+	 * kernfs file) frees it later, and counting the pool again could
+	 * make the policy stop more instances than needed.
+	 */
+	if (!ret && mk_flex_victims_chosen)
+		ret = multikernel_flexmem_remove_victims(mk_flex_reclaim_policy->name);
+
 	mk_flex_reclaim_result = ret;
+	if (ret == -EAGAIN) {
+		mk_flex_reclaim_pending = true;
+		return;
+	}
 	if (!ret)
 		cma_set_host_priority(true);
 
@@ -442,6 +562,9 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 			size >> 20, mk_flex_reclaim_policy->name,
 			multikernel_flexmem_reclaim_reason(ret),
 			u.free >> (20 - PAGE_SHIFT));
+	else if (mk_flex_nr_victims)
+		pr_info("EO_multikernel: host reclaim of %zu MB granted after stopping %d instance(s), the pool is lendable to the host\n",
+			size >> 20, mk_flex_nr_victims);
 	else
 		pr_info("EO_multikernel: host reclaim of %zu MB granted, %lu MB free in the pool now lendable to the host\n",
 			size >> 20, u.free >> (20 - PAGE_SHIFT));
@@ -480,6 +603,7 @@ int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 		mk_flex_reclaim_pending = false;
 		mk_flex_reclaim_result = -ENOSPC;
 		mk_flex_nr_victims = 0;
+		mk_flex_victims_chosen = false;
 		mutex_unlock(&mk_flex_borrow_mutex);
 		pr_warn("EO_multikernel: host reclaim of %zu MB %s\n",
 			size >> 20, multikernel_flexmem_reclaim_reason(-ENOSPC));
@@ -490,6 +614,9 @@ int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 	mk_flex_reclaim_size = size;
 	mk_flex_reclaim_policy = policy;
 	mk_flex_reclaim_pending = true;
+	mk_flex_reclaim_result = 0;
+	mk_flex_nr_victims = 0;
+	mk_flex_victims_chosen = false;
 	mutex_unlock(&mk_flex_borrow_mutex);
 
 	/* Wake the monitor up now rather than at its next period */
@@ -535,7 +662,7 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 
 	seq_printf(sf, "host priority: %s\n",
 		   cma_get_host_priority() ? "on" : "off");
-	if (mk_flex_reclaim_pending)
+	if (mk_flex_reclaim_pending && mk_flex_reclaim_result != -EAGAIN)
 		seq_printf(sf, "last request: %zu MB (%s), pending\n",
 			   mk_flex_reclaim_size >> 20, mk_flex_reclaim_policy->name);
 	else if (mk_flex_reclaim_size)
@@ -545,9 +672,11 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 	else
 		seq_puts(sf, "last request: none\n");
 	for (i = 0; i < mk_flex_nr_victims; i++)
-		seq_printf(sf, "  victim: instance %d (%s, %lu MB)\n",
-			   mk_flex_victims[i].id, mk_flex_victims[i].name,
-			   mk_flex_victims[i].pages >> (20 - PAGE_SHIFT));
+		seq_printf(sf, "  victim: instance %d (%s, %lu MB, %s), %s\n",
+			   mk_flex_victims[i].c.id, mk_flex_victims[i].c.name,
+			   mk_flex_victims[i].c.pages >> (20 - PAGE_SHIFT),
+			   mk_state_to_string(mk_flex_victims[i].c.state),
+			   mk_flex_victims[i].done ? "stopped" : "to stop");
 	seq_printf(sf, "pool: %lu MB, instances %lu MB, free %lu MB, lent to the host %lu MB\n",
 		   u.pool >> (20 - PAGE_SHIFT), u.instances >> (20 - PAGE_SHIFT),
 		   u.free >> (20 - PAGE_SHIFT), u.lent >> (20 - PAGE_SHIFT));
