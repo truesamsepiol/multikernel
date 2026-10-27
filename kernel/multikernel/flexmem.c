@@ -15,6 +15,8 @@
 #include <linux/vmstat.h>
 #include <linux/seq_file.h>
 #include <linux/workqueue.h>
+#include <linux/slab.h>
+#include <linux/sort.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
@@ -189,15 +191,112 @@ void multikernel_flexmem_set_borrow(int pct)
  * Writing a request only records it and wakes the monitor up, a delayed
  * work that handles it and then runs again every flex_reclaim_interval_ms.
  * A new request replaces one still pending: only the latest need counts.
+ *
+ * When the pool has not enough free pages, a policy picks the instances
+ * to stop (victims) until their memory covers what is missing.
  */
+
+/*
+ * Victim selection policies. Each one applies its own rule and nothing
+ * else: it does not try to stop fewer instances than its rule says.
+ * @cand lists the instances holding pool memory, oldest first; a policy
+ * may reorder the array and marks its victims until they cover @missing
+ * pages. The monitor checks the result, a policy that falls short gets
+ * its request refused and nothing is stopped.
+ */
+static int mk_flex_cmp_pages_asc(const void *a, const void *b)
+{
+	const struct mk_flex_candidate *x = a, *y = b;
+
+	return x->pages < y->pages ? -1 : x->pages > y->pages;
+}
+
+static int mk_flex_cmp_pages_desc(const void *a, const void *b)
+{
+	return mk_flex_cmp_pages_asc(b, a);
+}
+
+/* Mark victims from @cand[0] upwards (or downwards) until @missing is covered */
+static void mk_flex_take(struct mk_flex_candidate *cand, int nr,
+			 unsigned long missing, bool backwards)
+{
+	unsigned long got = 0;
+	int i;
+
+	for (i = 0; i < nr && got < missing; i++) {
+		struct mk_flex_candidate *c = &cand[backwards ? nr - 1 - i : i];
+
+		c->victim = true;
+		got += c->pages;
+	}
+}
+
+/* Smallest instances first, adding them up */
+static void mk_flex_policy_smallest_fit(struct mk_flex_candidate *cand, int nr,
+					unsigned long missing)
+{
+	sort(cand, nr, sizeof(*cand), mk_flex_cmp_pages_asc, NULL);
+	mk_flex_take(cand, nr, missing, false);
+}
+
+/* Largest instances first */
+static void mk_flex_policy_largest(struct mk_flex_candidate *cand, int nr,
+				   unsigned long missing)
+{
+	sort(cand, nr, sizeof(*cand), mk_flex_cmp_pages_desc, NULL);
+	mk_flex_take(cand, nr, missing, false);
+}
+
+/* Most recently created instances first */
+static void mk_flex_policy_newest(struct mk_flex_candidate *cand, int nr,
+				  unsigned long missing)
+{
+	mk_flex_take(cand, nr, missing, true);
+}
+
+/* Oldest instances first */
+static void mk_flex_policy_oldest(struct mk_flex_candidate *cand, int nr,
+				  unsigned long missing)
+{
+	mk_flex_take(cand, nr, missing, false);
+}
+
+/* The first one is the default */
+static const struct mk_flex_reclaim_policy mk_flex_policies[] = {
+	{ "smallest-fit", mk_flex_policy_smallest_fit },
+	{ "largest",      mk_flex_policy_largest },
+	{ "newest",       mk_flex_policy_newest },
+	{ "oldest",       mk_flex_policy_oldest },
+};
+
+static const struct mk_flex_reclaim_policy *multikernel_flexmem_find_policy(const char *name)
+{
+	int i;
+
+	if (!name)
+		return &mk_flex_policies[0];
+
+	for (i = 0; i < ARRAY_SIZE(mk_flex_policies); i++)
+		if (!strcmp(name, mk_flex_policies[i].name))
+			return &mk_flex_policies[i];
+
+	return NULL;
+}
+
 #define MK_FLEX_RECLAIM_INTERVAL_MS	100
 #define MK_FLEX_RECLAIM_INTERVAL_MIN_MS	10
 #define MK_FLEX_RECLAIM_INTERVAL_MAX_MS	60000
 
 static unsigned int mk_flex_reclaim_interval_ms = MK_FLEX_RECLAIM_INTERVAL_MS;
 static size_t mk_flex_reclaim_size;	/* last request, in bytes */
+static const struct mk_flex_reclaim_policy *mk_flex_reclaim_policy;
 static bool mk_flex_reclaim_pending;	/* not handled by the monitor yet */
 static int mk_flex_reclaim_result;	/* 0: granted, else why it was not */
+
+/* Victims chosen for the last request */
+#define MK_FLEX_MAX_VICTIMS	32
+static struct mk_flex_candidate mk_flex_victims[MK_FLEX_MAX_VICTIMS];
+static int mk_flex_nr_victims;
 
 static void multikernel_flexmem_reclaim_monitor(struct work_struct *work);
 static DECLARE_DELAYED_WORK(mk_flex_reclaim_work,
@@ -211,10 +310,98 @@ static const char *multikernel_flexmem_reclaim_reason(int err)
 	case -ENOSPC:
 		return "refused: larger than the pool";
 	case -EBUSY:
-		return "refused: not enough free memory in the pool";
+		return "refused: not enough memory even if every instance is stopped";
+	case -ENOMEM:
+		return "refused: the policy did not select enough victims";
+	case -EAGAIN:
+		return "victims selected (simulation: not stopped)";
 	default:
 		return "refused";
 	}
+}
+
+/*
+ * Snapshot of the instances holding pool memory, in creation order
+ * (mk_instance_list is appended to). Returns their number, or -ENOMEM.
+ */
+static int multikernel_flexmem_candidates(struct mk_flex_candidate **out)
+{
+	struct mk_flex_candidate *cand;
+	struct mk_instance *instance;
+	int nr = 0, i = 0;
+
+	mutex_lock(&mk_instance_mutex);
+	list_for_each_entry(instance, &mk_instance_list, list)
+		if (instance != root_instance && instance->flexmem_size)
+			nr++;
+
+	cand = nr ? kcalloc(nr, sizeof(*cand), GFP_KERNEL) : NULL;
+	if (nr && !cand) {
+		mutex_unlock(&mk_instance_mutex);
+		return -ENOMEM;
+	}
+
+	list_for_each_entry(instance, &mk_instance_list, list) {
+		if (instance == root_instance || !instance->flexmem_size)
+			continue;
+		cand[i].id = instance->id;
+		strscpy(cand[i].name, instance->name ?: "", sizeof(cand[i].name));
+		cand[i].pages = instance->flexmem_size >> PAGE_SHIFT;
+		i++;
+	}
+	mutex_unlock(&mk_instance_mutex);
+
+	*out = cand;
+	return nr;
+}
+
+/*
+ * The pool lacks @missing free pages: let the policy of the request pick
+ * the instances to stop. Simulation for now, the victims are only logged.
+ * Called by the monitor with mk_flex_borrow_mutex held.
+ */
+static int multikernel_flexmem_select_victims(unsigned long missing)
+{
+	const struct mk_flex_reclaim_policy *policy = mk_flex_reclaim_policy;
+	struct mk_flex_candidate *cand;
+	unsigned long total = 0, got = 0;
+	int nr, i, ret;
+
+	nr = multikernel_flexmem_candidates(&cand);
+	if (nr < 0)
+		return nr;
+
+	for (i = 0; i < nr; i++)
+		total += cand[i].pages;
+	/* Stopping every instance would not be enough: stop none */
+	if (total < missing) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	policy->select(cand, nr, missing);
+
+	for (i = 0; i < nr; i++) {
+		if (!cand[i].victim)
+			continue;
+		got += cand[i].pages;
+		if (mk_flex_nr_victims < MK_FLEX_MAX_VICTIMS)
+			mk_flex_victims[mk_flex_nr_victims++] = cand[i];
+	}
+	if (got < missing) {
+		mk_flex_nr_victims = 0;
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	for (i = 0; i < mk_flex_nr_victims; i++)
+		pr_info("EO_multikernel: host reclaim (%s): would stop instance %d (%s, %lu MB)\n",
+			policy->name, mk_flex_victims[i].id, mk_flex_victims[i].name,
+			mk_flex_victims[i].pages >> (20 - PAGE_SHIFT));
+	ret = -EAGAIN;
+out:
+	kfree(cand);
+	return ret;
 }
 
 /* Called by the monitor with mk_flex_borrow_mutex held */
@@ -236,13 +423,14 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 		return;
 	}
 
+	mk_flex_nr_victims = 0;
 	multikernel_flexmem_usage(&u);
 	if (nr_pages > u.free) {
 		/* Free pages may sit on per-cpu lists, uncounted */
 		drain_all_pages(NULL);
 		multikernel_flexmem_usage(&u);
 		if (nr_pages > u.free)
-			ret = -EBUSY;
+			ret = multikernel_flexmem_select_victims(nr_pages - u.free);
 	}
 
 	mk_flex_reclaim_result = ret;
@@ -250,8 +438,9 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 		cma_set_host_priority(true);
 
 	if (ret)
-		pr_warn("EO_multikernel: host reclaim of %zu MB %s (free %lu MB in the pool)\n",
-			size >> 20, multikernel_flexmem_reclaim_reason(ret),
+		pr_warn("EO_multikernel: host reclaim of %zu MB (%s) %s (free %lu MB in the pool)\n",
+			size >> 20, mk_flex_reclaim_policy->name,
+			multikernel_flexmem_reclaim_reason(ret),
 			u.free >> (20 - PAGE_SHIFT));
 	else
 		pr_info("EO_multikernel: host reclaim of %zu MB granted, %lu MB free in the pool now lendable to the host\n",
@@ -272,17 +461,25 @@ static void multikernel_flexmem_reclaim_monitor(struct work_struct *work)
 			   msecs_to_jiffies(READ_ONCE(mk_flex_reclaim_interval_ms)));
 }
 
-int multikernel_flexmem_reclaim(size_t size)
+int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 {
+	const struct mk_flex_reclaim_policy *policy;
+
 	if (!mk_flex_cma)
 		return -ENODEV;
+
+	policy = multikernel_flexmem_find_policy(policy_name);
+	if (!policy)
+		return -EINVAL;
 
 	/* Known at once: even with every instance stopped it cannot fit */
 	if (DIV_ROUND_UP(size, PAGE_SIZE) > cma_get_size(mk_flex_cma) >> PAGE_SHIFT) {
 		mutex_lock(&mk_flex_borrow_mutex);
 		mk_flex_reclaim_size = size;
+		mk_flex_reclaim_policy = policy;
 		mk_flex_reclaim_pending = false;
 		mk_flex_reclaim_result = -ENOSPC;
+		mk_flex_nr_victims = 0;
 		mutex_unlock(&mk_flex_borrow_mutex);
 		pr_warn("EO_multikernel: host reclaim of %zu MB %s\n",
 			size >> 20, multikernel_flexmem_reclaim_reason(-ENOSPC));
@@ -291,6 +488,7 @@ int multikernel_flexmem_reclaim(size_t size)
 
 	mutex_lock(&mk_flex_borrow_mutex);
 	mk_flex_reclaim_size = size;
+	mk_flex_reclaim_policy = policy;
 	mk_flex_reclaim_pending = true;
 	mutex_unlock(&mk_flex_borrow_mutex);
 
@@ -324,6 +522,7 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 {
 	struct mk_flex_usage u;
 	char policy[16];
+	int i;
 
 	if (!mk_flex_cma) {
 		seq_puts(sf, "no flexible pool\n");
@@ -337,20 +536,28 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 	seq_printf(sf, "host priority: %s\n",
 		   cma_get_host_priority() ? "on" : "off");
 	if (mk_flex_reclaim_pending)
-		seq_printf(sf, "last request: %zu MB, pending\n",
-			   mk_flex_reclaim_size >> 20);
+		seq_printf(sf, "last request: %zu MB (%s), pending\n",
+			   mk_flex_reclaim_size >> 20, mk_flex_reclaim_policy->name);
 	else if (mk_flex_reclaim_size)
-		seq_printf(sf, "last request: %zu MB, %s\n",
-			   mk_flex_reclaim_size >> 20,
+		seq_printf(sf, "last request: %zu MB (%s), %s\n",
+			   mk_flex_reclaim_size >> 20, mk_flex_reclaim_policy->name,
 			   multikernel_flexmem_reclaim_reason(mk_flex_reclaim_result));
 	else
 		seq_puts(sf, "last request: none\n");
+	for (i = 0; i < mk_flex_nr_victims; i++)
+		seq_printf(sf, "  victim: instance %d (%s, %lu MB)\n",
+			   mk_flex_victims[i].id, mk_flex_victims[i].name,
+			   mk_flex_victims[i].pages >> (20 - PAGE_SHIFT));
 	seq_printf(sf, "pool: %lu MB, instances %lu MB, free %lu MB, lent to the host %lu MB\n",
 		   u.pool >> (20 - PAGE_SHIFT), u.instances >> (20 - PAGE_SHIFT),
 		   u.free >> (20 - PAGE_SHIFT), u.lent >> (20 - PAGE_SHIFT));
 	seq_printf(sf, "borrow policy: %s\n", policy);
 	seq_printf(sf, "monitor period: %u ms\n",
 		   READ_ONCE(mk_flex_reclaim_interval_ms));
+	seq_puts(sf, "policies:");
+	for (i = 0; i < ARRAY_SIZE(mk_flex_policies); i++)
+		seq_printf(sf, i ? " %s" : " [%s]", mk_flex_policies[i].name);
+	seq_putc(sf, '\n');
 	mutex_unlock(&mk_flex_borrow_mutex);
 }
 

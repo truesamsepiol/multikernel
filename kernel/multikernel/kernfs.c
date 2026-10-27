@@ -198,9 +198,16 @@ static int flex_reclaim_seq_show(struct seq_file *sf, void *v)
 static ssize_t flex_reclaim_write(struct kernfs_open_file *of, char *buf,
 				  size_t count, loff_t off)
 {
-	char *str = strim(buf), *end;
+	char *str = strim(buf), *policy, *end;
 	unsigned long long size;
 	int ret;
+
+	/* "<size> [policy]" */
+	policy = strpbrk(str, " \t");
+	if (policy) {
+		*policy++ = '\0';
+		policy = skip_spaces(policy);
+	}
 
 	if (!*str)
 		return -EINVAL;
@@ -208,7 +215,7 @@ static ssize_t flex_reclaim_write(struct kernfs_open_file *of, char *buf,
 	if (*end)
 		return -EINVAL;
 
-	ret = multikernel_flexmem_reclaim(size);
+	ret = multikernel_flexmem_reclaim(size, policy);
 	return ret ? ret : count;
 }
 

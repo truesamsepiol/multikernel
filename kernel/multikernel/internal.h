@@ -46,7 +46,21 @@ void multikernel_flexmem_release(phys_addr_t base, size_t size);
 size_t multikernel_flexmem_size(void);
 int multikernel_flexmem_parse_borrow(const char *str, int *pct);
 void multikernel_flexmem_set_borrow(int pct);
-int multikernel_flexmem_reclaim(size_t size);
+
+/* A pool user (non-root instance) seen by a host reclaim policy */
+struct mk_flex_candidate {
+	int id;
+	char name[32];
+	unsigned long pages;	/* pool pages held */
+	bool victim;		/* set by the policy */
+};
+
+struct mk_flex_reclaim_policy {
+	const char *name;
+	void (*select)(struct mk_flex_candidate *cand, int nr, unsigned long missing);
+};
+
+int multikernel_flexmem_reclaim(size_t size, const char *policy_name);
 void multikernel_flexmem_reclaim_show(struct seq_file *sf);
 unsigned int multikernel_flexmem_reclaim_interval(void);
 int multikernel_flexmem_set_reclaim_interval(unsigned int ms);
