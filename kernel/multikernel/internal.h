@@ -83,6 +83,7 @@ struct mk_reclaim_victims {
 
 /* A resource of the pool the host can reclaim */
 struct mk_reclaim_resource {
+	const char *name;	/* in flex_reclaimed: "mem", "cpu" */
 	const char *unit;	/* of shown(), e.g. "MB" */
 	/* What @instance holds, 0 if it is not a candidate (mk_instance_mutex held) */
 	unsigned long (*amount)(struct mk_instance *instance);

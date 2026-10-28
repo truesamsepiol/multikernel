@@ -30,19 +30,17 @@
  * The free CPUs of the pool come first: an instance is only stopped when
  * they are not enough, and then the policy of the request picks the
  * instances (victims) whose CPUs cover what is missing. All the CPUs of
- * a victim go to the host, which may get a few more than asked.
- * For now the victims are only shown (simulation), nothing is stopped.
+ * a victim go to the host, which may get a few more than asked. The
+ * victims are stopped and deleted by the engine (reclaim.c), their CPUs
+ * coming back to the host when they are released.
  */
 static DEFINE_MUTEX(mk_cpu_reclaim_mutex);
 static unsigned int mk_cpu_reclaim_count;	/* last request, in CPUs */
 static const struct mk_reclaim_policy *mk_cpu_reclaim_policy;
 static bool mk_cpu_reclaim_pending;	/* not handled by the monitor yet */
 static int mk_cpu_reclaim_result;	/* 0: granted, else why it was not */
-static unsigned int mk_cpu_reclaim_given;	/* CPUs given for it */
+static unsigned int mk_cpu_reclaim_given;	/* free CPUs given for it */
 static bool mk_cpu_reclaim_whole_pool;	/* it asked more than the pool */
-static unsigned int mk_cpu_reclaim_free;	/* free CPUs when victims were chosen */
-/* Result: victims chosen and shown, nothing done (simulation) */
-#define MK_CPU_RECLAIM_SIMULATED	1
 static struct mk_reclaim_resource mk_cpu_reclaim_res;
 
 struct mk_cpu_usage {
@@ -142,6 +140,8 @@ static const char *mk_cpu_reclaim_reason(int err)
 		return "refused: not enough CPUs even if every instance is stopped";
 	case -ENOMEM:
 		return "refused: the policy did not select enough victims";
+	case -EAGAIN:
+		return "pending, stopping the victims";
 	default:
 		return "refused";
 	}
@@ -160,83 +160,89 @@ static unsigned long mk_cpu_victims_cpus(void)
 }
 
 /*
- * The free CPUs miss @missing to reach the target: let the policy pick
- * the victims. Not under mk_instance_mutex, the engine takes it.
+ * Called by the monitor with mk_cpu_reclaim_mutex held. The free CPUs are
+ * given and the victims chosen once per request: a retry (-EAGAIN, a
+ * lock held by kerf) only stops the remaining victims.
  */
-static int mk_cpu_reclaim_choose_victims(unsigned int count, struct mk_cpu_usage *u,
-					 unsigned int missing)
-{
-	struct mk_reclaim_victims *vs = &mk_cpu_reclaim_res.victims;
-	int ret;
-
-	pr_info("EO_multikernel: host reclaim of %u CPUs (%s): %u free CPUs in the pool, %u missing, choosing victims\n",
-		count, mk_cpu_reclaim_policy->name, u->free, missing);
-
-	ret = mk_reclaim_select_victims(&mk_cpu_reclaim_res, mk_cpu_reclaim_policy,
-					missing);
-	if (ret)
-		return ret;
-
-	mk_cpu_reclaim_free = u->free;
-	pr_info("EO_multikernel: host reclaim of %u CPUs (%s), simulation: %u free + %d victim(s) holding %lu CPUs, %lu CPUs for the host, nothing stopped\n",
-		count, mk_cpu_reclaim_policy->name, u->free, vs->nr,
-		mk_cpu_victims_cpus(), u->free + mk_cpu_victims_cpus());
-	return MK_CPU_RECLAIM_SIMULATED;
-}
-
-/* Called by the monitor with mk_cpu_reclaim_mutex held */
 static void mk_cpu_reclaim_process(unsigned int count)
 {
-	struct mk_cpu_usage u;
-	unsigned long *taken;
-	unsigned int target = 0;
-	bool victims = false;
+	struct mk_reclaim_victims *vs = &mk_cpu_reclaim_res.victims;
+	struct mk_cpu_usage u = {};
+	unsigned long *taken = NULL;
+	unsigned int target;
 	int ret = 0;
 
-	mk_cpu_reclaim_given = 0;
-	mk_cpu_reclaim_whole_pool = false;
 	if (!count) {
 		mk_reclaim_victims_reset(&mk_cpu_reclaim_res);
+		mk_cpu_reclaim_given = 0;
+		mk_cpu_reclaim_whole_pool = false;
 		mk_cpu_reclaim_result = 0;
 		pr_info("EO_multikernel: host CPU reclaim cleared, the CPUs given stay with the host\n");
 		return;
 	}
 
-	taken = bitmap_zalloc(NR_CPUS, GFP_KERNEL);
-	if (!taken) {
-		mk_cpu_reclaim_result = -ENOMEM;
-		return;
-	}
+	if (!vs->chosen) {
+		taken = bitmap_zalloc(NR_CPUS, GFP_KERNEL);
+		if (!taken) {
+			ret = -ENOMEM;
+			goto out;
+		}
 
-	mutex_lock(&mk_instance_mutex);
-	mk_cpu_usage(&u);
-	if (!u.pool) {
-		ret = -ENOSPC;
-	} else {
+		mutex_lock(&mk_instance_mutex);
+		mk_cpu_usage(&u);
+		mutex_unlock(&mk_instance_mutex);
+		if (!u.pool) {
+			ret = -ENOSPC;
+			goto out;
+		}
+
 		/* More than the pool: the host gets all of it */
 		target = min(count, u.pool);
 		mk_cpu_reclaim_whole_pool = count > u.pool;
+
 		/* The free CPUs first, instances only for what they miss */
-		if (u.free >= target)
-			mk_cpu_take_free(taken, target);
-		else
-			victims = true;
-	}
-	mutex_unlock(&mk_instance_mutex);
+		if (u.free < target) {
+			pr_info("EO_multikernel: host reclaim of %u CPUs (%s): %u free CPUs in the pool, %u missing, choosing victims\n",
+				count, mk_cpu_reclaim_policy->name, u.free,
+				target - u.free);
+			ret = mk_reclaim_select_victims(&mk_cpu_reclaim_res,
+							mk_cpu_reclaim_policy,
+							target - u.free);
+			if (ret)
+				goto out;
+		}
 
-	if (victims)
-		ret = mk_cpu_reclaim_choose_victims(count, &u, target - u.free);
-	else if (!ret)
+		/* kerf create may have taken one meanwhile: fewer are given */
+		mutex_lock(&mk_instance_mutex);
+		mk_cpu_take_free(taken, min(target, u.free));
+		mutex_unlock(&mk_instance_mutex);
 		mk_cpu_reclaim_given = mk_cpu_give_to_host(taken);
-	bitmap_free(taken);
+	}
 
+	/*
+	 * Once its victims are deleted the request is granted: their CPUs
+	 * come back to the host when they are released, later if a kernfs
+	 * file of the instance is still open.
+	 */
+	if (vs->chosen)
+		ret = mk_reclaim_remove_victims(&mk_cpu_reclaim_res,
+						mk_cpu_reclaim_policy->name);
+out:
+	bitmap_free(taken);
 	mk_cpu_reclaim_result = ret;
-	if (ret == MK_CPU_RECLAIM_SIMULATED)
+	if (ret == -EAGAIN) {
+		mk_cpu_reclaim_pending = true;
 		return;
+	}
+
 	if (ret)
 		pr_warn("EO_multikernel: host reclaim of %u CPUs (%s) %s (pool %u CPUs: %u free, %u held by instances)\n",
 			count, mk_cpu_reclaim_policy->name, mk_cpu_reclaim_reason(ret),
 			u.pool, u.free, u.instances);
+	else if (vs->nr)
+		pr_info("EO_multikernel: host reclaim of %u CPUs granted after stopping %d instance(s): %u free + %lu CPUs of the victims given to the host%s\n",
+			count, vs->nr, mk_cpu_reclaim_given, mk_cpu_victims_cpus(),
+			mk_cpu_reclaim_whole_pool ? ", all the CPUs of the pool" : "");
 	else if (mk_cpu_reclaim_whole_pool)
 		pr_info("EO_multikernel: host reclaim of %u CPUs granted: only %u CPUs in the pool, all of them given to the host (%u given)\n",
 			count, u.pool, mk_cpu_reclaim_given);
@@ -268,6 +274,7 @@ static unsigned long mk_cpu_reclaim_shown(unsigned long cpus)
 
 /* Its victims are protected by mk_cpu_reclaim_mutex */
 static struct mk_reclaim_resource mk_cpu_reclaim_res = {
+	.name = "cpu",
 	.unit = "CPUs",
 	.amount = mk_cpu_reclaim_amount,
 	.shown = mk_cpu_reclaim_shown,
@@ -319,15 +326,16 @@ void multikernel_cpu_reclaim_show(struct seq_file *sf)
 	mk_cpu_usage(&u);
 	mutex_unlock(&mk_instance_mutex);
 
-	if (mk_cpu_reclaim_pending)
+	if (mk_cpu_reclaim_pending && mk_cpu_reclaim_result != -EAGAIN)
 		seq_printf(sf, "last request: %u CPUs (%s), pending\n",
 			   mk_cpu_reclaim_count, mk_cpu_reclaim_policy->name);
-	else if (mk_cpu_reclaim_count &&
-		 mk_cpu_reclaim_result == MK_CPU_RECLAIM_SIMULATED)
-		seq_printf(sf, "last request: %u CPUs (%s), simulation: %u free + %d victims, %lu CPUs for the host\n",
+	else if (mk_cpu_reclaim_count && !mk_cpu_reclaim_result &&
+		 mk_cpu_reclaim_res.victims.nr)
+		seq_printf(sf, "last request: %u CPUs (%s), granted: %u free + %d victims, %lu CPUs given to the host%s\n",
 			   mk_cpu_reclaim_count, mk_cpu_reclaim_policy->name,
-			   mk_cpu_reclaim_free, mk_cpu_reclaim_res.victims.nr,
-			   mk_cpu_reclaim_free + mk_cpu_victims_cpus());
+			   mk_cpu_reclaim_given, mk_cpu_reclaim_res.victims.nr,
+			   mk_cpu_reclaim_given + mk_cpu_victims_cpus(),
+			   mk_cpu_reclaim_whole_pool ? ", all the CPUs of the pool" : "");
 	else if (mk_cpu_reclaim_count && !mk_cpu_reclaim_result)
 		seq_printf(sf, "last request: %u CPUs (%s), granted: %u CPUs given to the host%s\n",
 			   mk_cpu_reclaim_count, mk_cpu_reclaim_policy->name,

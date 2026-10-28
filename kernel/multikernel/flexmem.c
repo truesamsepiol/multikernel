@@ -214,6 +214,7 @@ static void multikernel_flexmem_reclaim_monitor(void);
 
 /* Its victims are protected by mk_flex_borrow_mutex */
 static struct mk_reclaim_resource mk_flex_reclaim_res = {
+	.name = "mem",
 	.unit = "MB",
 	.amount = multikernel_flexmem_reclaim_amount,
 	.shown = multikernel_flexmem_reclaim_shown,

@@ -27,7 +27,8 @@
  *    covers what is missing,
  *  - the victims are stopped and deleted at once (INIT, no graceful
  *    halt), as kerf kill --force, unload and delete would do,
- *  - each deletion is recorded for kerf (flex_reclaimed),
+ *  - each deletion is recorded for kerf (flex_reclaimed, with the
+ *    resource reclaimed),
  *  - a monitor, a delayed work, handles the requests of every resource
  *    and then runs again every flex_reclaim_interval_ms.
  */
@@ -150,6 +151,7 @@ void mk_reclaim_policies_show(struct seq_file *sf)
 struct mk_reclaimed {
 	struct mk_reclaim_candidate c;
 	unsigned long shown;		/* amount in the unit of the resource */
+	const char *resource;		/* its name */
 	time64_t when;			/* seconds since the epoch */
 	const char *policy;
 };
@@ -167,6 +169,7 @@ static void mk_reclaim_record(struct mk_reclaim_resource *res,
 	r = &mk_reclaim_history[mk_reclaim_history_count++ % MK_RECLAIM_HISTORY];
 	r->c = *c;
 	r->shown = res->shown(c->amount);
+	r->resource = res->name;
 	r->when = ktime_get_real_seconds();
 	r->policy = policy;
 
@@ -175,7 +178,11 @@ static void mk_reclaim_record(struct mk_reclaim_resource *res,
 	mutex_unlock(&mk_reclaim_history_mutex);
 }
 
-/* One line per deleted instance, oldest first: id name MB time policy state */
+/*
+ * One line per deleted instance, oldest first:
+ *   id name amount time policy state resource
+ * amount in MB for "mem", in CPUs for "cpu".
+ */
 void mk_reclaim_history_show(struct seq_file *sf)
 {
 	unsigned int i, first;
@@ -186,9 +193,9 @@ void mk_reclaim_history_show(struct seq_file *sf)
 	for (i = first; i < mk_reclaim_history_count; i++) {
 		struct mk_reclaimed *r = &mk_reclaim_history[i % MK_RECLAIM_HISTORY];
 
-		seq_printf(sf, "%d %s %lu %lld %s %s\n", r->c.id, r->c.name,
-			   r->shown, (long long)r->when,
-			   r->policy, mk_state_to_string(r->c.state));
+		seq_printf(sf, "%d %s %lu %lld %s %s %s\n", r->c.id, r->c.name,
+			   r->shown, (long long)r->when, r->policy,
+			   mk_state_to_string(r->c.state), r->resource);
 	}
 	mutex_unlock(&mk_reclaim_history_mutex);
 }
