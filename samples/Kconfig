@@ -320,6 +320,15 @@ config SAMPLE_HUNG_TASK
 	  Reading these files with multiple processes triggers hung task
 	  detection by holding locks for a long time (256 seconds).
 
+config SAMPLE_MK_RECLAIM_POLICY
+	tristate "Multikernel host reclaim policy (ready-first)"
+	depends on MULTIKERNEL && m
+	help
+	  Build a module that registers the "ready-first" victim selection
+	  policy for the multikernel host reclaims (flex_reclaim and
+	  cpu_reclaim): instances not running are stopped before the running
+	  ones. An example of mk_reclaim_register_policy().
+
 source "samples/rust/Kconfig"
 
 source "samples/damon/Kconfig"

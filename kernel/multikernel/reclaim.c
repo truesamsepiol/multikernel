@@ -5,6 +5,8 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/list.h>
 #include <linux/types.h>
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
@@ -39,7 +41,8 @@
  * @cand lists the instances holding the resource, oldest first; a policy
  * may reorder the array and marks its victims until they cover @missing.
  * The engine checks the result, a policy that falls short gets its
- * request refused and nothing is stopped.
+ * request refused and nothing is stopped. The built-in ones do the same
+ * for every resource.
  */
 /* Ties go to the oldest instance, whatever the order: sort() is not stable */
 static int mk_reclaim_cmp_order(const struct mk_reclaim_candidate *x,
@@ -83,7 +86,8 @@ static void mk_reclaim_take(struct mk_reclaim_candidate *cand, int nr,
 
 /* Smallest instances first, adding them up */
 static void mk_reclaim_policy_smallest_fit(struct mk_reclaim_candidate *cand, int nr,
-					   unsigned long missing)
+					   unsigned long missing,
+					   const char *resource)
 {
 	sort(cand, nr, sizeof(*cand), mk_reclaim_cmp_amount_asc, NULL);
 	mk_reclaim_take(cand, nr, missing, false);
@@ -91,7 +95,8 @@ static void mk_reclaim_policy_smallest_fit(struct mk_reclaim_candidate *cand, in
 
 /* Largest instances first */
 static void mk_reclaim_policy_largest(struct mk_reclaim_candidate *cand, int nr,
-				      unsigned long missing)
+				      unsigned long missing,
+				      const char *resource)
 {
 	sort(cand, nr, sizeof(*cand), mk_reclaim_cmp_amount_desc, NULL);
 	mk_reclaim_take(cand, nr, missing, false);
@@ -99,48 +104,130 @@ static void mk_reclaim_policy_largest(struct mk_reclaim_candidate *cand, int nr,
 
 /* Most recently created instances first */
 static void mk_reclaim_policy_newest(struct mk_reclaim_candidate *cand, int nr,
-				     unsigned long missing)
+				     unsigned long missing,
+				     const char *resource)
 {
 	mk_reclaim_take(cand, nr, missing, true);
 }
 
 /* Oldest instances first */
 static void mk_reclaim_policy_oldest(struct mk_reclaim_candidate *cand, int nr,
-				     unsigned long missing)
+				     unsigned long missing,
+				     const char *resource)
 {
 	mk_reclaim_take(cand, nr, missing, false);
 }
 
 /* The first one is the default */
-static const struct mk_reclaim_policy mk_reclaim_policies[] = {
-	{ "smallest-fit", mk_reclaim_policy_smallest_fit },
-	{ "largest",      mk_reclaim_policy_largest },
-	{ "newest",       mk_reclaim_policy_newest },
-	{ "oldest",       mk_reclaim_policy_oldest },
+static struct mk_reclaim_policy mk_reclaim_builtin_policies[] = {
+	{ .name = "smallest-fit", .select = mk_reclaim_policy_smallest_fit },
+	{ .name = "largest",      .select = mk_reclaim_policy_largest },
+	{ .name = "newest",       .select = mk_reclaim_policy_newest },
+	{ .name = "oldest",       .select = mk_reclaim_policy_oldest },
 };
 
-const struct mk_reclaim_policy *mk_reclaim_find_policy(const char *name)
+/*
+ * Every policy, the built-in ones first, then those of modules. A request
+ * holds a reference on the module of its policy: the module cannot be
+ * unloaded, nor its policy unregistered, while a request uses it.
+ */
+static DEFINE_MUTEX(mk_reclaim_policy_mutex);
+static LIST_HEAD(mk_reclaim_policies);
+
+static struct mk_reclaim_policy *mk_reclaim_lookup_policy(const char *name)
 {
-	int i;
+	struct mk_reclaim_policy *policy;
 
-	if (!name)
-		return &mk_reclaim_policies[0];
+	lockdep_assert_held(&mk_reclaim_policy_mutex);
 
-	for (i = 0; i < ARRAY_SIZE(mk_reclaim_policies); i++)
-		if (!strcmp(name, mk_reclaim_policies[i].name))
-			return &mk_reclaim_policies[i];
-
+	list_for_each_entry(policy, &mk_reclaim_policies, list)
+		if (!strcmp(name, policy->name))
+			return policy;
 	return NULL;
 }
+
+struct mk_reclaim_policy *mk_reclaim_get_policy(const char *name)
+{
+	struct mk_reclaim_policy *policy;
+
+	if (!name)
+		return &mk_reclaim_builtin_policies[0];
+
+	mutex_lock(&mk_reclaim_policy_mutex);
+	policy = mk_reclaim_lookup_policy(name);
+	/* A module being unloaded is refused */
+	if (policy && !try_module_get(policy->owner))
+		policy = NULL;
+	mutex_unlock(&mk_reclaim_policy_mutex);
+	return policy;
+}
+
+void mk_reclaim_put_policy(struct mk_reclaim_policy *policy)
+{
+	if (policy)
+		module_put(policy->owner);
+}
+
+int mk_reclaim_register_policy(struct mk_reclaim_policy *policy)
+{
+	int ret = 0;
+
+	if (!policy || !policy->name || !policy->select ||
+	    strnlen(policy->name, MK_RECLAIM_POLICY_NAME_MAX) == MK_RECLAIM_POLICY_NAME_MAX ||
+	    !*policy->name || strpbrk(policy->name, " \t\n"))
+		return -EINVAL;
+
+	mutex_lock(&mk_reclaim_policy_mutex);
+	if (mk_reclaim_lookup_policy(policy->name))
+		ret = -EEXIST;
+	else
+		list_add_tail(&policy->list, &mk_reclaim_policies);
+	mutex_unlock(&mk_reclaim_policy_mutex);
+
+	if (!ret)
+		pr_info("EO_multikernel: host reclaim policy '%s' registered\n",
+			policy->name);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mk_reclaim_register_policy);
+
+/* From the module exit: no request uses the policy any more */
+void mk_reclaim_unregister_policy(struct mk_reclaim_policy *policy)
+{
+	mutex_lock(&mk_reclaim_policy_mutex);
+	list_del(&policy->list);
+	mutex_unlock(&mk_reclaim_policy_mutex);
+
+	pr_info("EO_multikernel: host reclaim policy '%s' unregistered\n",
+		policy->name);
+}
+EXPORT_SYMBOL_GPL(mk_reclaim_unregister_policy);
 
 /* " [default] other ...", as read in flex_reclaim */
 void mk_reclaim_policies_show(struct seq_file *sf)
 {
+	struct mk_reclaim_policy *policy;
+	bool first = true;
+
+	mutex_lock(&mk_reclaim_policy_mutex);
+	list_for_each_entry(policy, &mk_reclaim_policies, list) {
+		seq_printf(sf, first ? " [%s]" : " %s", policy->name);
+		first = false;
+	}
+	mutex_unlock(&mk_reclaim_policy_mutex);
+}
+
+/* Before any request can be written */
+static int __init mk_reclaim_policies_init(void)
+{
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(mk_reclaim_policies); i++)
-		seq_printf(sf, i ? " %s" : " [%s]", mk_reclaim_policies[i].name);
+	for (i = 0; i < ARRAY_SIZE(mk_reclaim_builtin_policies); i++)
+		list_add_tail(&mk_reclaim_builtin_policies[i].list,
+			      &mk_reclaim_policies);
+	return 0;
 }
+core_initcall(mk_reclaim_policies_init);
 
 /*
  * Instances deleted by host reclaims, for kerf: the 16 last ones, read in
@@ -153,7 +240,8 @@ struct mk_reclaimed {
 	unsigned long shown;		/* amount in the unit of the resource */
 	const char *resource;		/* its name */
 	time64_t when;			/* seconds since the epoch */
-	const char *policy;
+	/* A copy: the module of the policy may be gone when it is read */
+	char policy[MK_RECLAIM_POLICY_NAME_MAX];
 };
 static DEFINE_MUTEX(mk_reclaim_history_mutex);
 static struct mk_reclaimed mk_reclaim_history[MK_RECLAIM_HISTORY];
@@ -171,7 +259,7 @@ static void mk_reclaim_record(struct mk_reclaim_resource *res,
 	r->shown = res->shown(c->amount);
 	r->resource = res->name;
 	r->when = ktime_get_real_seconds();
-	r->policy = policy;
+	strscpy(r->policy, policy, sizeof(r->policy));
 
 	if (mk_reclaim_history_kn)
 		kernfs_notify(mk_reclaim_history_kn);
@@ -255,7 +343,7 @@ static int mk_reclaim_candidates(struct mk_reclaim_resource *res,
  * with the lock of the resource held.
  */
 int mk_reclaim_select_victims(struct mk_reclaim_resource *res,
-			      const struct mk_reclaim_policy *policy,
+			      struct mk_reclaim_policy *policy,
 			      unsigned long missing)
 {
 	struct mk_reclaim_victims *vs = &res->victims;
@@ -275,7 +363,7 @@ int mk_reclaim_select_victims(struct mk_reclaim_resource *res,
 		goto out;
 	}
 
-	policy->select(cand, nr, missing);
+	policy->select(cand, nr, missing, res->name);
 
 	for (i = 0; i < nr; i++) {
 		if (!cand[i].victim)

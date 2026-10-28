@@ -53,20 +53,7 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf);
 
 /* reclaim.c: host reclaim engine, common to every pool resource */
 
-/* An instance holding a resource of the pool, seen by a reclaim policy */
-struct mk_reclaim_candidate {
-	int id;
-	char name[32];
-	unsigned long amount;	/* held: pages, CPUs... */
-	enum mk_instance_state state;
-	int order;		/* rank in creation order, oldest 0 */
-	bool victim;		/* set by the policy */
-};
-
-struct mk_reclaim_policy {
-	const char *name;
-	void (*select)(struct mk_reclaim_candidate *cand, int nr, unsigned long missing);
-};
+/* Candidates and policies: include/linux/multikernel.h */
 
 /* Victims chosen for the last request of a resource */
 #define MK_RECLAIM_MAX_VICTIMS	32
@@ -102,10 +89,12 @@ static inline void mk_reclaim_victims_reset(struct mk_reclaim_resource *res)
 	res->victims.chosen = false;
 }
 
-const struct mk_reclaim_policy *mk_reclaim_find_policy(const char *name);
+/* With a reference on its module, dropped by mk_reclaim_put_policy() */
+struct mk_reclaim_policy *mk_reclaim_get_policy(const char *name);
+void mk_reclaim_put_policy(struct mk_reclaim_policy *policy);
 void mk_reclaim_policies_show(struct seq_file *sf);
 int mk_reclaim_select_victims(struct mk_reclaim_resource *res,
-			      const struct mk_reclaim_policy *policy,
+			      struct mk_reclaim_policy *policy,
 			      unsigned long missing);
 int mk_reclaim_remove_victims(struct mk_reclaim_resource *res, const char *policy);
 void mk_reclaim_victims_show(struct mk_reclaim_resource *res, struct seq_file *sf);

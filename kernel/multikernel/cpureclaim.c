@@ -36,7 +36,8 @@
  */
 static DEFINE_MUTEX(mk_cpu_reclaim_mutex);
 static unsigned int mk_cpu_reclaim_count;	/* last request, in CPUs */
-static const struct mk_reclaim_policy *mk_cpu_reclaim_policy;
+/* With a reference on its module, until the next request */
+static struct mk_reclaim_policy *mk_cpu_reclaim_policy;
 static bool mk_cpu_reclaim_pending;	/* not handled by the monitor yet */
 static int mk_cpu_reclaim_result;	/* 0: granted, else why it was not */
 static unsigned int mk_cpu_reclaim_given;	/* free CPUs given for it */
@@ -283,10 +284,10 @@ static struct mk_reclaim_resource mk_cpu_reclaim_res = {
 
 int multikernel_cpu_reclaim(unsigned int count, const char *policy_name)
 {
-	const struct mk_reclaim_policy *policy;
+	struct mk_reclaim_policy *policy, *old;
 	struct mk_cpu_usage u;
 
-	policy = mk_reclaim_find_policy(policy_name);
+	policy = mk_reclaim_get_policy(policy_name);
 	if (!policy)
 		return -EINVAL;
 
@@ -297,6 +298,7 @@ int multikernel_cpu_reclaim(unsigned int count, const char *policy_name)
 
 	mutex_lock(&mk_cpu_reclaim_mutex);
 	mk_cpu_reclaim_count = count;
+	old = mk_cpu_reclaim_policy;
 	mk_cpu_reclaim_policy = policy;
 	mk_cpu_reclaim_given = 0;
 	mk_cpu_reclaim_whole_pool = false;
@@ -305,6 +307,7 @@ int multikernel_cpu_reclaim(unsigned int count, const char *policy_name)
 		mk_cpu_reclaim_pending = false;
 		mk_cpu_reclaim_result = -ENOSPC;
 		mutex_unlock(&mk_cpu_reclaim_mutex);
+		mk_reclaim_put_policy(old);
 		pr_warn("EO_multikernel: host reclaim of %u CPUs %s\n",
 			count, mk_cpu_reclaim_reason(-ENOSPC));
 		return -ENOSPC;
@@ -312,6 +315,8 @@ int multikernel_cpu_reclaim(unsigned int count, const char *policy_name)
 	mk_cpu_reclaim_pending = true;
 	mk_cpu_reclaim_result = 0;
 	mutex_unlock(&mk_cpu_reclaim_mutex);
+	/* Not used any more: the monitor runs under mk_cpu_reclaim_mutex */
+	mk_reclaim_put_policy(old);
 
 	mk_reclaim_wake();
 	return 0;

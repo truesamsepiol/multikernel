@@ -733,6 +733,58 @@ static inline int multikernel_force_halt_by_id(int mk_id)
 }
 #endif
 
+/*
+ * Host reclaim of the pool (kernel/multikernel/reclaim.c): when the free
+ * part of the pool is not enough for the host, a victim selection policy
+ * picks the instances to stop. Four policies are built in (smallest-fit,
+ * the default, largest, newest, oldest); a module may add its own.
+ */
+#define MK_RECLAIM_POLICY_NAME_MAX	32
+
+/* An instance holding a resource of the pool, seen by a policy */
+struct mk_reclaim_candidate {
+	int id;
+	char name[32];
+	unsigned long amount;	/* held: pages for "mem", CPUs for "cpu" */
+	enum mk_instance_state state;
+	int order;		/* rank in creation order, oldest 0 */
+	bool victim;		/* set by the policy */
+};
+
+/**
+ * struct mk_reclaim_policy - Victim selection policy of host reclaims
+ * @name: Name written after the amount in flex_reclaim or cpu_reclaim,
+ *	shorter than MK_RECLAIM_POLICY_NAME_MAX
+ * @select: Mark the victims of @cand, the @nr instances holding
+ *	@resource ("mem" or "cpu"), oldest first, until they cover
+ *	@missing (pages or CPUs). It may reorder @cand. The engine checks
+ *	the result: a policy that falls short gets the request refused and
+ *	nothing is stopped. Called by the reclaim monitor, it must not
+ *	take any multikernel lock.
+ * @owner: THIS_MODULE, kept loaded while a request uses the policy
+ * @list: Used by the engine
+ */
+struct mk_reclaim_policy {
+	const char *name;
+	void (*select)(struct mk_reclaim_candidate *cand, int nr,
+		       unsigned long missing, const char *resource);
+	struct module *owner;
+	struct list_head list;
+};
+
+#ifdef CONFIG_MULTIKERNEL
+int mk_reclaim_register_policy(struct mk_reclaim_policy *policy);
+void mk_reclaim_unregister_policy(struct mk_reclaim_policy *policy);
+#else
+static inline int mk_reclaim_register_policy(struct mk_reclaim_policy *policy)
+{
+	return -ENODEV;
+}
+static inline void mk_reclaim_unregister_policy(struct mk_reclaim_policy *policy)
+{
+}
+#endif
+
 /**
  * Version and Compatibility
  */

@@ -195,7 +195,8 @@ void multikernel_flexmem_set_borrow(int pct)
  * is missing, and the engine stops and deletes them (reclaim.c).
  */
 static size_t mk_flex_reclaim_size;	/* last request, in bytes */
-static const struct mk_reclaim_policy *mk_flex_reclaim_policy;
+/* With a reference on its module, until the next request */
+static struct mk_reclaim_policy *mk_flex_reclaim_policy;
 static bool mk_flex_reclaim_pending;	/* not handled by the monitor yet */
 static int mk_flex_reclaim_result;	/* 0: granted, else why it was not */
 
@@ -320,12 +321,12 @@ static void multikernel_flexmem_reclaim_monitor(void)
 
 int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 {
-	const struct mk_reclaim_policy *policy;
+	struct mk_reclaim_policy *policy, *old;
 
 	if (!mk_flex_cma)
 		return -ENODEV;
 
-	policy = mk_reclaim_find_policy(policy_name);
+	policy = mk_reclaim_get_policy(policy_name);
 	if (!policy)
 		return -EINVAL;
 
@@ -333,11 +334,13 @@ int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 	if (DIV_ROUND_UP(size, PAGE_SIZE) > cma_get_size(mk_flex_cma) >> PAGE_SHIFT) {
 		mutex_lock(&mk_flex_borrow_mutex);
 		mk_flex_reclaim_size = size;
+		old = mk_flex_reclaim_policy;
 		mk_flex_reclaim_policy = policy;
 		mk_flex_reclaim_pending = false;
 		mk_flex_reclaim_result = -ENOSPC;
 		mk_reclaim_victims_reset(&mk_flex_reclaim_res);
 		mutex_unlock(&mk_flex_borrow_mutex);
+		mk_reclaim_put_policy(old);
 		pr_warn("EO_multikernel: host reclaim of %zu MB %s\n",
 			size >> 20, multikernel_flexmem_reclaim_reason(-ENOSPC));
 		return -ENOSPC;
@@ -345,11 +348,14 @@ int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 
 	mutex_lock(&mk_flex_borrow_mutex);
 	mk_flex_reclaim_size = size;
+	old = mk_flex_reclaim_policy;
 	mk_flex_reclaim_policy = policy;
 	mk_flex_reclaim_pending = true;
 	mk_flex_reclaim_result = 0;
 	mk_reclaim_victims_reset(&mk_flex_reclaim_res);
 	mutex_unlock(&mk_flex_borrow_mutex);
+	/* Not used any more: the monitor runs under mk_flex_borrow_mutex */
+	mk_reclaim_put_policy(old);
 
 	mk_reclaim_wake();
 	return 0;
