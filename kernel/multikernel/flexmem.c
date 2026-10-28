@@ -14,13 +14,7 @@
 #include <linux/sched/signal.h>
 #include <linux/vmstat.h>
 #include <linux/seq_file.h>
-#include <linux/workqueue.h>
 #include <linux/slab.h>
-#include <linux/sort.h>
-#include <linux/kexec.h>
-#include <linux/suspend.h>
-#include <linux/kernfs.h>
-#include <linux/timekeeping.h>
 #include <linux/multikernel.h>
 #include "internal.h"
 
@@ -192,156 +186,39 @@ void multikernel_flexmem_set_borrow(int pct)
  * is unchanged, cma_alloc() migrates the lent pages away. A request of 0
  * ends the host priority and the borrow policy applies again.
  *
- * Writing a request only records it and wakes the monitor up, a delayed
- * work that handles it and then runs again every flex_reclaim_interval_ms.
+ * Writing a request only records it and wakes the monitor up (reclaim.c),
+ * which handles it and then runs again every flex_reclaim_interval_ms.
  * A new request replaces one still pending: only the latest need counts.
  *
- * When the pool has not enough free pages, a policy picks the instances
- * to stop (victims) until their memory covers what is missing. They are
- * chosen once per request, then stopped and deleted at once (INIT, no
- * graceful halt), as kerf kill --force, unload and delete would do.
+ * When the pool has not enough free pages, the policy of the request
+ * picks the instances to stop (victims) until their memory covers what
+ * is missing, and the engine stops and deletes them (reclaim.c).
  */
-
-/*
- * Victim selection policies. Each one applies its own rule and nothing
- * else: it does not try to stop fewer instances than its rule says.
- * @cand lists the instances holding pool memory, oldest first; a policy
- * may reorder the array and marks its victims until they cover @missing
- * pages. The monitor checks the result, a policy that falls short gets
- * its request refused and nothing is stopped.
- */
-static int mk_flex_cmp_pages_asc(const void *a, const void *b)
-{
-	const struct mk_flex_candidate *x = a, *y = b;
-
-	return x->pages < y->pages ? -1 : x->pages > y->pages;
-}
-
-static int mk_flex_cmp_pages_desc(const void *a, const void *b)
-{
-	return mk_flex_cmp_pages_asc(b, a);
-}
-
-/* Mark victims from @cand[0] upwards (or downwards) until @missing is covered */
-static void mk_flex_take(struct mk_flex_candidate *cand, int nr,
-			 unsigned long missing, bool backwards)
-{
-	unsigned long got = 0;
-	int i;
-
-	for (i = 0; i < nr && got < missing; i++) {
-		struct mk_flex_candidate *c = &cand[backwards ? nr - 1 - i : i];
-
-		c->victim = true;
-		got += c->pages;
-	}
-}
-
-/* Smallest instances first, adding them up */
-static void mk_flex_policy_smallest_fit(struct mk_flex_candidate *cand, int nr,
-					unsigned long missing)
-{
-	sort(cand, nr, sizeof(*cand), mk_flex_cmp_pages_asc, NULL);
-	mk_flex_take(cand, nr, missing, false);
-}
-
-/* Largest instances first */
-static void mk_flex_policy_largest(struct mk_flex_candidate *cand, int nr,
-				   unsigned long missing)
-{
-	sort(cand, nr, sizeof(*cand), mk_flex_cmp_pages_desc, NULL);
-	mk_flex_take(cand, nr, missing, false);
-}
-
-/* Most recently created instances first */
-static void mk_flex_policy_newest(struct mk_flex_candidate *cand, int nr,
-				  unsigned long missing)
-{
-	mk_flex_take(cand, nr, missing, true);
-}
-
-/* Oldest instances first */
-static void mk_flex_policy_oldest(struct mk_flex_candidate *cand, int nr,
-				  unsigned long missing)
-{
-	mk_flex_take(cand, nr, missing, false);
-}
-
-/* The first one is the default */
-static const struct mk_flex_reclaim_policy mk_flex_policies[] = {
-	{ "smallest-fit", mk_flex_policy_smallest_fit },
-	{ "largest",      mk_flex_policy_largest },
-	{ "newest",       mk_flex_policy_newest },
-	{ "oldest",       mk_flex_policy_oldest },
-};
-
-static const struct mk_flex_reclaim_policy *multikernel_flexmem_find_policy(const char *name)
-{
-	int i;
-
-	if (!name)
-		return &mk_flex_policies[0];
-
-	for (i = 0; i < ARRAY_SIZE(mk_flex_policies); i++)
-		if (!strcmp(name, mk_flex_policies[i].name))
-			return &mk_flex_policies[i];
-
-	return NULL;
-}
-
-#define MK_FLEX_RECLAIM_INTERVAL_MS	100
-#define MK_FLEX_RECLAIM_INTERVAL_MIN_MS	10
-#define MK_FLEX_RECLAIM_INTERVAL_MAX_MS	60000
-
-static unsigned int mk_flex_reclaim_interval_ms = MK_FLEX_RECLAIM_INTERVAL_MS;
 static size_t mk_flex_reclaim_size;	/* last request, in bytes */
-static const struct mk_flex_reclaim_policy *mk_flex_reclaim_policy;
+static const struct mk_reclaim_policy *mk_flex_reclaim_policy;
 static bool mk_flex_reclaim_pending;	/* not handled by the monitor yet */
 static int mk_flex_reclaim_result;	/* 0: granted, else why it was not */
 
-/* Victims chosen for the last request */
-#define MK_FLEX_MAX_VICTIMS	32
-struct mk_flex_victim {
-	struct mk_flex_candidate c;
-	bool done;		/* stopped and deleted */
-};
-static struct mk_flex_victim mk_flex_victims[MK_FLEX_MAX_VICTIMS];
-static int mk_flex_nr_victims;
-static bool mk_flex_victims_chosen;	/* for the current request */
-
-/*
- * Instances deleted by host reclaims, for kerf: the 16 last ones, read in
- * flex_reclaimed. The file is notified on each deletion (poll()).
- */
-#define MK_FLEX_HISTORY		16
-struct mk_flex_reclaimed {
-	struct mk_flex_candidate c;
-	time64_t when;			/* seconds since the epoch */
-	const char *policy;
-};
-static struct mk_flex_reclaimed mk_flex_history[MK_FLEX_HISTORY];
-static unsigned int mk_flex_history_count;	/* ever recorded */
-static struct kernfs_node *mk_flex_reclaimed_kn;
-
-static void multikernel_flexmem_record_reclaimed(struct mk_flex_candidate *c,
-						 const char *policy)
+/* An instance holds the pages of its flexible pool */
+static unsigned long multikernel_flexmem_reclaim_amount(struct mk_instance *instance)
 {
-	struct mk_flex_reclaimed *r;
-
-	lockdep_assert_held(&mk_flex_borrow_mutex);
-
-	r = &mk_flex_history[mk_flex_history_count++ % MK_FLEX_HISTORY];
-	r->c = *c;
-	r->when = ktime_get_real_seconds();
-	r->policy = policy;
-
-	if (mk_flex_reclaimed_kn)
-		kernfs_notify(mk_flex_reclaimed_kn);
+	return instance->flexmem_size >> PAGE_SHIFT;
 }
 
-static void multikernel_flexmem_reclaim_monitor(struct work_struct *work);
-static DECLARE_DELAYED_WORK(mk_flex_reclaim_work,
-			    multikernel_flexmem_reclaim_monitor);
+static unsigned long multikernel_flexmem_reclaim_shown(unsigned long pages)
+{
+	return pages >> (20 - PAGE_SHIFT);
+}
+
+static void multikernel_flexmem_reclaim_monitor(void);
+
+/* Its victims are protected by mk_flex_borrow_mutex */
+static struct mk_reclaim_resource mk_flex_reclaim_res = {
+	.unit = "MB",
+	.amount = multikernel_flexmem_reclaim_amount,
+	.shown = multikernel_flexmem_reclaim_shown,
+	.process = multikernel_flexmem_reclaim_monitor,
+};
 
 static const char *multikernel_flexmem_reclaim_reason(int err)
 {
@@ -361,190 +238,10 @@ static const char *multikernel_flexmem_reclaim_reason(int err)
 	}
 }
 
-/*
- * Snapshot of the instances holding pool memory, in creation order
- * (mk_instance_list is appended to). Returns their number, or -ENOMEM.
- */
-static int multikernel_flexmem_candidates(struct mk_flex_candidate **out)
-{
-	struct mk_flex_candidate *cand;
-	struct mk_instance *instance;
-	int nr = 0, i = 0;
-
-	mutex_lock(&mk_instance_mutex);
-	list_for_each_entry(instance, &mk_instance_list, list)
-		if (instance != root_instance && instance->flexmem_size)
-			nr++;
-
-	cand = nr ? kcalloc(nr, sizeof(*cand), GFP_KERNEL) : NULL;
-	if (nr && !cand) {
-		mutex_unlock(&mk_instance_mutex);
-		return -ENOMEM;
-	}
-
-	list_for_each_entry(instance, &mk_instance_list, list) {
-		if (instance == root_instance || !instance->flexmem_size)
-			continue;
-		cand[i].id = instance->id;
-		strscpy(cand[i].name, instance->name ?: "", sizeof(cand[i].name));
-		cand[i].pages = instance->flexmem_size >> PAGE_SHIFT;
-		cand[i].state = instance->state;
-		i++;
-	}
-	mutex_unlock(&mk_instance_mutex);
-
-	*out = cand;
-	return nr;
-}
-
-/*
- * The pool lacks @missing free pages: let the policy of the request pick
- * the instances to stop. Called by the monitor with mk_flex_borrow_mutex
- * held.
- */
-static int multikernel_flexmem_select_victims(unsigned long missing)
-{
-	const struct mk_flex_reclaim_policy *policy = mk_flex_reclaim_policy;
-	struct mk_flex_candidate *cand;
-	unsigned long total = 0, got = 0;
-	int nr, i, ret;
-
-	nr = multikernel_flexmem_candidates(&cand);
-	if (nr < 0)
-		return nr;
-
-	for (i = 0; i < nr; i++)
-		total += cand[i].pages;
-	/* Stopping every instance would not be enough: stop none */
-	if (total < missing) {
-		ret = -EBUSY;
-		goto out;
-	}
-
-	policy->select(cand, nr, missing);
-
-	for (i = 0; i < nr; i++) {
-		if (!cand[i].victim)
-			continue;
-		got += cand[i].pages;
-		/* Each victim must be recorded to be stopped */
-		if (mk_flex_nr_victims == MK_FLEX_MAX_VICTIMS) {
-			got = 0;
-			break;
-		}
-		mk_flex_victims[mk_flex_nr_victims].c = cand[i];
-		mk_flex_victims[mk_flex_nr_victims].done = false;
-		mk_flex_nr_victims++;
-	}
-	if (got < missing) {
-		mk_flex_nr_victims = 0;
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	mk_flex_victims_chosen = true;
-	ret = 0;
-out:
-	kfree(cand);
-	return ret;
-}
-
-/* The instance @c still exists: same id and same name as when chosen */
-static struct mk_instance *mk_flex_victim_lookup(struct mk_flex_candidate *c)
-{
-	struct mk_instance *instance;
-
-	lockdep_assert_held(&mk_instance_mutex);
-
-	instance = idr_find(&mk_instance_idr, c->id);
-	if (instance && strcmp(instance->name ?: "", c->name))
-		return NULL;
-	return instance;
-}
-
-/*
- * Stop and delete one victim, as kerf kill --force, unload and delete:
- * INIT if it runs, then unload its kernel, then delete it. The pool
- * memory goes back to CMA when its last reference is dropped.
- */
-static int multikernel_flexmem_remove_victim(struct mk_flex_candidate *c,
-					     const char *policy)
-{
-	struct mk_instance *instance;
-	enum mk_instance_state state;
-	int ret;
-
-	mutex_lock(&mk_instance_mutex);
-	instance = mk_flex_victim_lookup(c);
-	state = instance ? instance->state : MK_STATE_EMPTY;
-	mutex_unlock(&mk_instance_mutex);
-
-	/* Deleted meanwhile (kerf delete): its memory is coming back anyway */
-	if (!instance) {
-		pr_info("EO_multikernel: host reclaim (%s): instance %d (%s) already gone\n",
-			policy, c->id, c->name);
-		return 0;
-	}
-
-	if (state == MK_STATE_ACTIVE) {
-		ret = multikernel_force_halt_by_id(c->id);
-		if (ret)
-			return ret;
-	}
-
-	ret = multikernel_kexec_unload_by_id(c->id);
-	if (ret)
-		return ret;
-
-	mutex_lock(&mk_instance_mutex);
-	instance = mk_flex_victim_lookup(c);
-	ret = instance ? mk_instance_destroy(instance) : 0;
-	mutex_unlock(&mk_instance_mutex);
-	if (ret)
-		return ret;
-
-	multikernel_flexmem_record_reclaimed(c, policy);
-	pr_warn("EO_multikernel: host reclaim (%s): instance %d (%s, %lu MB, %s) stopped and deleted\n",
-		policy, c->id, c->name, c->pages >> (20 - PAGE_SHIFT),
-		mk_state_to_string(c->state));
-	return 0;
-}
-
-/*
- * Stop the victims not done yet. system_transition_mutex serializes with
- * kerf start and kill, and is only tried, as the kexec lock: the monitor
- * never waits on kerf, it retries at its next period (-EAGAIN).
- */
-static int multikernel_flexmem_remove_victims(const char *policy)
-{
-	int i, ret = 0;
-
-	if (!mutex_trylock(&system_transition_mutex))
-		return -EAGAIN;
-
-	for (i = 0; i < mk_flex_nr_victims; i++) {
-		if (mk_flex_victims[i].done)
-			continue;
-		ret = multikernel_flexmem_remove_victim(&mk_flex_victims[i].c, policy);
-		if (ret)
-			break;
-		mk_flex_victims[i].done = true;
-	}
-
-	mutex_unlock(&system_transition_mutex);
-
-	if (ret) {
-		pr_warn_ratelimited("EO_multikernel: host reclaim (%s): cannot stop instance %d (%s) yet: %d, retrying\n",
-				    policy, mk_flex_victims[i].c.id,
-				    mk_flex_victims[i].c.name, ret);
-		return -EAGAIN;
-	}
-	return 0;
-}
-
 /* Called by the monitor with mk_flex_borrow_mutex held */
 static void multikernel_flexmem_reclaim_process(size_t size)
 {
+	struct mk_reclaim_victims *vs = &mk_flex_reclaim_res.victims;
 	struct mk_flex_usage u;
 	unsigned long nr_pages = DIV_ROUND_UP(size, PAGE_SIZE);
 	int ret = 0;
@@ -556,8 +253,7 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 		/* Same as a stricter policy: CMA pages left on per-cpu lists */
 		if (was_on && cma_get_borrow_threshold() >= 0)
 			drain_all_pages(NULL);
-		mk_flex_nr_victims = 0;
-		mk_flex_victims_chosen = false;
+		mk_reclaim_victims_reset(&mk_flex_reclaim_res);
 		mk_flex_reclaim_result = 0;
 		pr_info("EO_multikernel: host priority over the flexible CMA pool ended\n");
 		return;
@@ -565,7 +261,7 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 
 	multikernel_flexmem_usage(&u);
 	/* Victims are chosen once: a retry only stops the remaining ones */
-	if (!mk_flex_victims_chosen && nr_pages > u.free) {
+	if (!vs->chosen && nr_pages > u.free) {
 		/* Free pages may sit on per-cpu lists, uncounted */
 		drain_all_pages(NULL);
 		multikernel_flexmem_usage(&u);
@@ -574,7 +270,9 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 				size >> 20, mk_flex_reclaim_policy->name,
 				u.free >> (20 - PAGE_SHIFT),
 				(nr_pages - u.free) >> (20 - PAGE_SHIFT));
-			ret = multikernel_flexmem_select_victims(nr_pages - u.free);
+			ret = mk_reclaim_select_victims(&mk_flex_reclaim_res,
+							mk_flex_reclaim_policy,
+							nr_pages - u.free);
 		}
 	}
 
@@ -584,8 +282,9 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 	 * kernfs file) frees it later, and counting the pool again could
 	 * make the policy stop more instances than needed.
 	 */
-	if (!ret && mk_flex_victims_chosen)
-		ret = multikernel_flexmem_remove_victims(mk_flex_reclaim_policy->name);
+	if (!ret && vs->chosen)
+		ret = mk_reclaim_remove_victims(&mk_flex_reclaim_res,
+						mk_flex_reclaim_policy->name);
 
 	mk_flex_reclaim_result = ret;
 	if (ret == -EAGAIN) {
@@ -600,15 +299,15 @@ static void multikernel_flexmem_reclaim_process(size_t size)
 			size >> 20, mk_flex_reclaim_policy->name,
 			multikernel_flexmem_reclaim_reason(ret),
 			u.free >> (20 - PAGE_SHIFT));
-	else if (mk_flex_nr_victims)
+	else if (vs->nr)
 		pr_info("EO_multikernel: host reclaim of %zu MB granted after stopping %d instance(s), the pool is lendable to the host\n",
-			size >> 20, mk_flex_nr_victims);
+			size >> 20, vs->nr);
 	else
 		pr_info("EO_multikernel: host reclaim of %zu MB granted, %lu MB free in the pool now lendable to the host\n",
 			size >> 20, u.free >> (20 - PAGE_SHIFT));
 }
 
-static void multikernel_flexmem_reclaim_monitor(struct work_struct *work)
+static void multikernel_flexmem_reclaim_monitor(void)
 {
 	mutex_lock(&mk_flex_borrow_mutex);
 	if (mk_flex_reclaim_pending) {
@@ -616,20 +315,16 @@ static void multikernel_flexmem_reclaim_monitor(struct work_struct *work)
 		multikernel_flexmem_reclaim_process(mk_flex_reclaim_size);
 	}
 	mutex_unlock(&mk_flex_borrow_mutex);
-
-	/* A request written meanwhile has already queued an immediate run */
-	queue_delayed_work(system_unbound_wq, &mk_flex_reclaim_work,
-			   msecs_to_jiffies(READ_ONCE(mk_flex_reclaim_interval_ms)));
 }
 
 int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 {
-	const struct mk_flex_reclaim_policy *policy;
+	const struct mk_reclaim_policy *policy;
 
 	if (!mk_flex_cma)
 		return -ENODEV;
 
-	policy = multikernel_flexmem_find_policy(policy_name);
+	policy = mk_reclaim_find_policy(policy_name);
 	if (!policy)
 		return -EINVAL;
 
@@ -640,8 +335,7 @@ int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 		mk_flex_reclaim_policy = policy;
 		mk_flex_reclaim_pending = false;
 		mk_flex_reclaim_result = -ENOSPC;
-		mk_flex_nr_victims = 0;
-		mk_flex_victims_chosen = false;
+		mk_reclaim_victims_reset(&mk_flex_reclaim_res);
 		mutex_unlock(&mk_flex_borrow_mutex);
 		pr_warn("EO_multikernel: host reclaim of %zu MB %s\n",
 			size >> 20, multikernel_flexmem_reclaim_reason(-ENOSPC));
@@ -653,33 +347,10 @@ int multikernel_flexmem_reclaim(size_t size, const char *policy_name)
 	mk_flex_reclaim_policy = policy;
 	mk_flex_reclaim_pending = true;
 	mk_flex_reclaim_result = 0;
-	mk_flex_nr_victims = 0;
-	mk_flex_victims_chosen = false;
+	mk_reclaim_victims_reset(&mk_flex_reclaim_res);
 	mutex_unlock(&mk_flex_borrow_mutex);
 
-	/* Wake the monitor up now rather than at its next period */
-	mod_delayed_work(system_unbound_wq, &mk_flex_reclaim_work, 0);
-	return 0;
-}
-
-unsigned int multikernel_flexmem_reclaim_interval(void)
-{
-	return READ_ONCE(mk_flex_reclaim_interval_ms);
-}
-
-int multikernel_flexmem_set_reclaim_interval(unsigned int ms)
-{
-	if (ms < MK_FLEX_RECLAIM_INTERVAL_MIN_MS ||
-	    ms > MK_FLEX_RECLAIM_INTERVAL_MAX_MS)
-		return -EINVAL;
-
-	WRITE_ONCE(mk_flex_reclaim_interval_ms, ms);
-	/* The new period applies from now, not after the current one */
-	if (mk_flex_cma)
-		mod_delayed_work(system_unbound_wq, &mk_flex_reclaim_work,
-				 msecs_to_jiffies(ms));
-
-	pr_info("EO_multikernel: host reclaim monitor period set to %u ms\n", ms);
+	mk_reclaim_wake();
 	return 0;
 }
 
@@ -687,7 +358,6 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 {
 	struct mk_flex_usage u;
 	char policy[16];
-	int i;
 
 	if (!mk_flex_cma) {
 		seq_puts(sf, "no flexible pool\n");
@@ -709,60 +379,23 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 			   multikernel_flexmem_reclaim_reason(mk_flex_reclaim_result));
 	else
 		seq_puts(sf, "last request: none\n");
-	for (i = 0; i < mk_flex_nr_victims; i++)
-		seq_printf(sf, "  victim: instance %d (%s, %lu MB, %s), %s\n",
-			   mk_flex_victims[i].c.id, mk_flex_victims[i].c.name,
-			   mk_flex_victims[i].c.pages >> (20 - PAGE_SHIFT),
-			   mk_state_to_string(mk_flex_victims[i].c.state),
-			   mk_flex_victims[i].done ? "stopped" : "to stop");
+	mk_reclaim_victims_show(&mk_flex_reclaim_res, sf);
 	seq_printf(sf, "pool: %lu MB, instances %lu MB, free %lu MB, lent to the host %lu MB\n",
 		   u.pool >> (20 - PAGE_SHIFT), u.instances >> (20 - PAGE_SHIFT),
 		   u.free >> (20 - PAGE_SHIFT), u.lent >> (20 - PAGE_SHIFT));
 	seq_printf(sf, "borrow policy: %s\n", policy);
-	seq_printf(sf, "monitor period: %u ms\n",
-		   READ_ONCE(mk_flex_reclaim_interval_ms));
+	seq_printf(sf, "monitor period: %u ms\n", mk_reclaim_interval());
 	seq_puts(sf, "policies:");
-	for (i = 0; i < ARRAY_SIZE(mk_flex_policies); i++)
-		seq_printf(sf, i ? " %s" : " [%s]", mk_flex_policies[i].name);
+	mk_reclaim_policies_show(sf);
 	seq_putc(sf, '\n');
 	mutex_unlock(&mk_flex_borrow_mutex);
 }
 
-/* One line per deleted instance, oldest first: id name MB time policy state */
-void multikernel_flexmem_reclaimed_show(struct seq_file *sf)
-{
-	unsigned int i, first;
-
-	mutex_lock(&mk_flex_borrow_mutex);
-	first = mk_flex_history_count > MK_FLEX_HISTORY ?
-		mk_flex_history_count - MK_FLEX_HISTORY : 0;
-	for (i = first; i < mk_flex_history_count; i++) {
-		struct mk_flex_reclaimed *r = &mk_flex_history[i % MK_FLEX_HISTORY];
-
-		seq_printf(sf, "%d %s %lu %lld %s %s\n", r->c.id, r->c.name,
-			   r->c.pages >> (20 - PAGE_SHIFT), (long long)r->when,
-			   r->policy, mk_state_to_string(r->c.state));
-	}
-	mutex_unlock(&mk_flex_borrow_mutex);
-}
-
-void multikernel_flexmem_set_reclaimed_node(struct kernfs_node *kn)
-{
-	mutex_lock(&mk_flex_borrow_mutex);
-	mk_flex_reclaimed_kn = kn;
-	mutex_unlock(&mk_flex_borrow_mutex);
-}
-
-/* Workqueues are not up when the pool is declared: start the monitor here */
+/* Workqueues are not up when the pool is declared: register here */
 static int __init multikernel_flexmem_monitor_init(void)
 {
-	if (!mk_flex_cma)
-		return 0;
-
-	queue_delayed_work(system_unbound_wq, &mk_flex_reclaim_work,
-			   msecs_to_jiffies(READ_ONCE(mk_flex_reclaim_interval_ms)));
-	pr_info("EO_multikernel: host reclaim monitor started, period %u ms\n",
-		READ_ONCE(mk_flex_reclaim_interval_ms));
+	if (mk_flex_cma)
+		mk_reclaim_register(&mk_flex_reclaim_res);
 	return 0;
 }
 late_initcall(multikernel_flexmem_monitor_init);

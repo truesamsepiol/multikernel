@@ -227,7 +227,7 @@ static const struct kernfs_ops mk_flex_reclaim_ops = {
 /* Root-level flex_reclaim_interval_ms attribute - period of the reclaim monitor */
 static int flex_reclaim_interval_seq_show(struct seq_file *sf, void *v)
 {
-	seq_printf(sf, "%u\n", multikernel_flexmem_reclaim_interval());
+	seq_printf(sf, "%u\n", mk_reclaim_interval());
 	return 0;
 }
 
@@ -240,7 +240,7 @@ static ssize_t flex_reclaim_interval_write(struct kernfs_open_file *of, char *bu
 	if (kstrtouint(strim(buf), 10, &ms))
 		return -EINVAL;
 
-	ret = multikernel_flexmem_set_reclaim_interval(ms);
+	ret = mk_reclaim_set_interval(ms);
 	return ret ? ret : count;
 }
 
@@ -252,7 +252,7 @@ static const struct kernfs_ops mk_flex_reclaim_interval_ops = {
 /* Root-level flex_reclaimed attribute - instances deleted by host reclaims */
 static int flex_reclaimed_seq_show(struct seq_file *sf, void *v)
 {
-	multikernel_flexmem_reclaimed_show(sf);
+	mk_reclaim_history_show(sf);
 	return 0;
 }
 
@@ -765,7 +765,7 @@ int mk_kernfs_init(void)
 		kernfs_destroy_root(mk_kernfs_root);
 		return ret;
 	}
-	multikernel_flexmem_set_reclaimed_node(flex_reclaimed_kn);
+	mk_reclaim_set_history_node(flex_reclaimed_kn);
 
 	/* Register the filesystem */
 	ret = register_filesystem(&mk_fs_type);
