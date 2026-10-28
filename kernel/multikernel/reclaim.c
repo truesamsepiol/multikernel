@@ -40,16 +40,29 @@
  * The engine checks the result, a policy that falls short gets its
  * request refused and nothing is stopped.
  */
+/* Ties go to the oldest instance, whatever the order: sort() is not stable */
+static int mk_reclaim_cmp_order(const struct mk_reclaim_candidate *x,
+				const struct mk_reclaim_candidate *y)
+{
+	return x->order < y->order ? -1 : x->order > y->order;
+}
+
 static int mk_reclaim_cmp_amount_asc(const void *a, const void *b)
 {
 	const struct mk_reclaim_candidate *x = a, *y = b;
 
-	return x->amount < y->amount ? -1 : x->amount > y->amount;
+	if (x->amount != y->amount)
+		return x->amount < y->amount ? -1 : 1;
+	return mk_reclaim_cmp_order(x, y);
 }
 
 static int mk_reclaim_cmp_amount_desc(const void *a, const void *b)
 {
-	return mk_reclaim_cmp_amount_asc(b, a);
+	const struct mk_reclaim_candidate *x = a, *y = b;
+
+	if (x->amount != y->amount)
+		return x->amount > y->amount ? -1 : 1;
+	return mk_reclaim_cmp_order(x, y);
 }
 
 /* Mark victims from @cand[0] upwards (or downwards) until @missing is covered */
@@ -221,6 +234,7 @@ static int mk_reclaim_candidates(struct mk_reclaim_resource *res,
 		strscpy(cand[i].name, instance->name ?: "", sizeof(cand[i].name));
 		cand[i].amount = amount;
 		cand[i].state = instance->state;
+		cand[i].order = i;
 		i++;
 	}
 	mutex_unlock(&mk_instance_mutex);

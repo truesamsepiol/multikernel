@@ -59,6 +59,7 @@ struct mk_reclaim_candidate {
 	char name[32];
 	unsigned long amount;	/* held: pages, CPUs... */
 	enum mk_instance_state state;
+	int order;		/* rank in creation order, oldest 0 */
 	bool victim;		/* set by the policy */
 };
 
