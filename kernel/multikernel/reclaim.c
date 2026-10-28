@@ -399,7 +399,7 @@ void mk_reclaim_victims_show(struct mk_reclaim_resource *res, struct seq_file *s
 #define MK_RECLAIM_INTERVAL_MAX_MS	60000
 
 static unsigned int mk_reclaim_interval_ms = MK_RECLAIM_INTERVAL_MS;
-/* Resources are only registered at boot, before the monitor first runs */
+/* Resources are only registered at boot, before the monitor starts */
 static LIST_HEAD(mk_reclaim_resources);
 static bool mk_reclaim_started;
 
@@ -444,19 +444,26 @@ int mk_reclaim_set_interval(unsigned int ms)
 	return 0;
 }
 
-/*
- * Workqueues are not up when the resources are set up: each one
- * registers from an initcall, the first starts the monitor.
- */
+/* Each resource registers from a late_initcall */
 void __init mk_reclaim_register(struct mk_reclaim_resource *res)
 {
 	list_add_tail(&res->list, &mk_reclaim_resources);
-	if (mk_reclaim_started)
-		return;
+}
+
+/*
+ * Workqueues are not up when the resources are set up. The monitor
+ * starts after every late_initcall: the list no longer changes.
+ */
+static int __init mk_reclaim_start(void)
+{
+	if (list_empty(&mk_reclaim_resources))
+		return 0;
 
 	WRITE_ONCE(mk_reclaim_started, true);
 	queue_delayed_work(system_unbound_wq, &mk_reclaim_work,
 			   msecs_to_jiffies(READ_ONCE(mk_reclaim_interval_ms)));
 	pr_info("EO_multikernel: host reclaim monitor started, period %u ms\n",
 		READ_ONCE(mk_reclaim_interval_ms));
+	return 0;
 }
+late_initcall_sync(mk_reclaim_start);

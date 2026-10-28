@@ -391,7 +391,7 @@ void multikernel_flexmem_reclaim_show(struct seq_file *sf)
 	mutex_unlock(&mk_flex_borrow_mutex);
 }
 
-/* Workqueues are not up when the pool is declared: register here */
+/* The pool is declared before the monitor can start: register here */
 static int __init multikernel_flexmem_monitor_init(void)
 {
 	if (mk_flex_cma)

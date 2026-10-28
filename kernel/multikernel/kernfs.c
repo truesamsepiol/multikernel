@@ -224,6 +224,39 @@ static const struct kernfs_ops mk_flex_reclaim_ops = {
 	.write = flex_reclaim_write,
 };
 
+/* Root-level cpu_reclaim attribute - host reclaim of the CPUs of the pool */
+static int cpu_reclaim_seq_show(struct seq_file *sf, void *v)
+{
+	multikernel_cpu_reclaim_show(sf);
+	return 0;
+}
+
+static ssize_t cpu_reclaim_write(struct kernfs_open_file *of, char *buf,
+				 size_t count, loff_t off)
+{
+	char *str = strim(buf), *policy;
+	unsigned int cpus;
+	int ret;
+
+	/* "<cpus> [policy]" */
+	policy = strpbrk(str, " \t");
+	if (policy) {
+		*policy++ = '\0';
+		policy = skip_spaces(policy);
+	}
+
+	if (kstrtouint(str, 10, &cpus))
+		return -EINVAL;
+
+	ret = multikernel_cpu_reclaim(cpus, policy);
+	return ret ? ret : count;
+}
+
+static const struct kernfs_ops mk_cpu_reclaim_ops = {
+	.seq_show = cpu_reclaim_seq_show,
+	.write = cpu_reclaim_write,
+};
+
 /* Root-level flex_reclaim_interval_ms attribute - period of the reclaim monitor */
 static int flex_reclaim_interval_seq_show(struct seq_file *sf, void *v)
 {
@@ -741,6 +774,16 @@ int mk_kernfs_init(void)
 	if (IS_ERR(flex_reclaim_kn)) {
 		ret = PTR_ERR(flex_reclaim_kn);
 		pr_err("Failed to create root flex_reclaim file: %d\n", ret);
+		kernfs_destroy_root(mk_kernfs_root);
+		return ret;
+	}
+
+	struct kernfs_node *cpu_reclaim_kn = __kernfs_create_file(mk_root_kn, "cpu_reclaim", 0644,
+								   GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+								   &mk_cpu_reclaim_ops, NULL, NULL, NULL);
+	if (IS_ERR(cpu_reclaim_kn)) {
+		ret = PTR_ERR(cpu_reclaim_kn);
+		pr_err("Failed to create root cpu_reclaim file: %d\n", ret);
 		kernfs_destroy_root(mk_kernfs_root);
 		return ret;
 	}

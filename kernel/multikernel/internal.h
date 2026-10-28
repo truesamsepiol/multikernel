@@ -113,3 +113,7 @@ void mk_reclaim_wake(void);
 unsigned int mk_reclaim_interval(void);
 int mk_reclaim_set_interval(unsigned int ms);
 void mk_reclaim_register(struct mk_reclaim_resource *res);
+
+/* cpureclaim.c */
+int multikernel_cpu_reclaim(unsigned int count, const char *policy_name);
+void multikernel_cpu_reclaim_show(struct seq_file *sf);
