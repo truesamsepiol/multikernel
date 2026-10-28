@@ -134,7 +134,6 @@ static void mk_instance_release(struct kref *kref)
 	kfree(instance->name);
 	kfree(instance->stdout_path);	/* kstrdup() in mk_create_instance_from_dtb() */
 	kfree(instance);
-	mk_baseline_clear_resources(root_instance);//EO -> retrive: 3
 }
 
 /**
@@ -364,24 +363,30 @@ int mk_instance_return_cpus(struct mk_instance *instance,
 		return -EINVAL;
 	}
 
-	/* Transfer: remove from instance, add back to root */
+	/*
+	 * The CPUs go back to the host: once online they are its own and
+	 * leave the pool, the next kerf init takes them again. A CPU that
+	 * cannot be onlined stays offline in the pool, free for an instance.
+	 */
 	for_each_set_bit(phys_cpu, cpus, NR_CPUS) {
 		clear_bit(phys_cpu, instance->cpus);
 		set_bit(phys_cpu, root_instance->cpus);
 		//EO -> retrive: 2
 		logical_cpu = arch_cpu_from_physical_id(phys_cpu);
 		int ret = add_cpu(logical_cpu);
-	       	if (ret) 
-			pr_err("Failed to online CPU %u (logical %d): %d\n",
+	       	if (ret) {
+			pr_err("Failed to online CPU %u (logical %d): %d, left in the pool\n",
 			       phys_cpu, logical_cpu, ret);
-		else
+		} else {
+			clear_bit(phys_cpu, root_instance->cpus);
 			pr_info("Onlined CPU %u (logical %d) for host kernel\n",
 				phys_cpu, logical_cpu);
+		}
 	}
 
-	pr_info("Returned %d CPUs from instance %d (%s) to root: %*pbl\n",
-		requested_count, instance->id, instance->name,
-		NR_CPUS, cpus);
+	/* @cpus may be instance->cpus, emptied above: no list to print */
+	pr_info("Returned %d CPUs from instance %d (%s) to the host\n",
+		requested_count, instance->id, instance->name);
 
 	return 0;
 }
