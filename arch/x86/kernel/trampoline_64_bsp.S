@@ -180,6 +180,20 @@ startup_64_bsp:
 	/* Load kernel address into register */
 	movq    (kernel_phys_addr - bsp_base)(%rsi), %r14
 
+	/*
+	 * If the host passed an identity-mapped page table covering all of
+	 * RAM and the loaded segments (the kexec image's arch.pgd), switch to
+	 * it: the tables built above map only 4 GB, and the code below adds
+	 * a single 1 GB page around the entry point, so a kernel or initrd
+	 * crossing a 1 GB boundary above 4 GB would fault with no IDT.
+	 * The new tables also map this trampoline (low memory).
+	 */
+	movq	(kernel_pgd_phys_addr - bsp_base)(%rsi), %rax
+	testq	%rax, %rax
+	jz	3f
+	movq	%rax, %cr3
+	jmp	2f
+3:
 	/* Check whether the kernel is in the 4 GB we mapped already,
 	 * and if not, add an additional mapping */
 	movq	$0xffffffff00000000, %r8
@@ -221,6 +235,10 @@ SYM_DATA(boot_params_phys_addr, .quad  0)
 
 	.align 8
 SYM_DATA(kernel_phys_addr, .quad  0)
+
+	/* Physical address of a full identity map, or 0 (see startup_64_bsp) */
+	.align 8
+SYM_DATA(kernel_pgd_phys_addr, .quad  0)
 
 	.code16
 	.balign 4

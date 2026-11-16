@@ -914,6 +914,7 @@ extern const unsigned char x86_trampoline_bsp_start [];
 extern const unsigned char x86_trampoline_bsp_end   [];
 extern unsigned long kernel_phys_addr;
 extern unsigned long boot_params_phys_addr;
+extern unsigned long kernel_pgd_phys_addr;
 
 #define TRAMPOLINE_SYM_BSP(x)                                           \
         ((void *)(x86_trampoline_bsp_base +                                     \
@@ -926,7 +927,8 @@ static inline unsigned long trampoline_bsp_address(void)
 }
 
 // must be locked by cpus_read_lock()
-static int do_multikernel_boot_cpu(u32 apicid, int cpu, unsigned long kernel_start_address)
+static int do_multikernel_boot_cpu(u32 apicid, int cpu, unsigned long kernel_start_address,
+				   unsigned long pgd_phys)
 {
 	unsigned long start_ip;
 	int ret;
@@ -938,11 +940,12 @@ static int do_multikernel_boot_cpu(u32 apicid, int cpu, unsigned long kernel_sta
         unsigned long *kernel_virt_addr = TRAMPOLINE_SYM_BSP(&kernel_phys_addr);
 
         *kernel_virt_addr = kernel_start_address;
+	*(unsigned long *)TRAMPOLINE_SYM_BSP(&kernel_pgd_phys_addr) = pgd_phys;
 
         /* start_ip had better be page-aligned! */
         start_ip = trampoline_bsp_address();
 
-	pr_info("do_multikernel_boot_cpu(apicid=%u, cpu=%u, kernel_start_address=%lx)\n", apicid, cpu, kernel_start_address);
+	pr_info("do_multikernel_boot_cpu(apicid=%u, cpu=%u, kernel_start_address=%lx, identity_pgd=%lx)\n", apicid, cpu, kernel_start_address, pgd_phys);
 
 	/* Skip init_espfix_ap(cpu); */
 
@@ -1092,9 +1095,10 @@ static int do_boot_cpu(u32 apicid, unsigned int cpu, struct task_struct *idle)
 }
 
 // must be locked by cpus_read_lock()
-int multikernel_kick_ap(unsigned int cpu, unsigned long kernel_start_address)
+int multikernel_kick_ap(unsigned int cpu, struct kimage *image)
 {
 	u32 apicid = apic->cpu_present_to_apicid(cpu);
+	unsigned long pgd_phys = 0;
 	int err;
 
 	lockdep_assert_irqs_enabled();
@@ -1121,7 +1125,19 @@ int multikernel_kick_ap(unsigned int cpu, unsigned long kernel_start_address)
 	per_cpu(fpu_fpregs_owner_ctx, cpu) = NULL;
 	/* skip common_cpu_up(cpu, tidle); */
 
-	err = do_multikernel_boot_cpu(apicid, cpu, kernel_start_address);
+	/*
+	 * The identity map built by machine_kexec_prepare() covers all of RAM
+	 * and the segments of the instance. The trampoline enables 4-level
+	 * paging only: with 5-level paging that table cannot be used, and
+	 * the instance must then fit in the 1 GB the trampoline maps.
+	 */
+	if (image->arch.pgd && !pgtable_l5_enabled())
+		pgd_phys = __pa(image->arch.pgd);
+	else
+		pr_warn("multikernel: no full identity map for CPU %u (5-level paging): the instance must not cross a 1 GB boundary above 4 GB\n",
+			cpu);
+
+	err = do_multikernel_boot_cpu(apicid, cpu, image->start, pgd_phys);
 	if (err)
 		pr_err("do_multikernel_boot_cpu failed(%d) to wakeup CPU#%u\n", err, cpu);
 

@@ -1599,7 +1599,7 @@ int multikernel_kexec_by_id(int mk_id)
 		mk_image->mk_id, mk_image->start, cpu);
 
 	cpus_read_lock();
-	rc = multikernel_kick_ap(cpu, mk_image->start);
+	rc = multikernel_kick_ap(cpu, mk_image);
 	cpus_read_unlock();
 
 	if (rc == 0) {
