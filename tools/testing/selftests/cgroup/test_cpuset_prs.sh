@@ -478,10 +478,10 @@ REMOTE_TEST_MATRIX=(
 							 p1:P0|p2:P1|c11:P2|c12:P1|c22:P2 \
 							 1-2,4-6|1-2,5-6"
 	# Cpusets with empty cpuset.cpus should inherit parent's effective_cpus
-	"  C1-4:P1 C5-6   C1-2     .       C5      .  \
+	"  C1-4:P1:S+ C5-6:S+ C1-2  .       C5      .  \
 	      .      P1    P1      .       .       .     p1:3-4|p2:5-6|c11:1-2|c12:3-4|c21:5|c22:5-6 \
 							 p1:P1|p2:P1|c11:P1"
-	"  C1-4:P1 C5-6   C1-2     .       C5      .  \
+	"  C1-4:P1:S+ C5-6:S+ C1-2  .       C5      .  \
 	      .      P1    P1      .      O5=0     .     p1:3-4|p2:6|c11:1-2|c12:3-4|c21:6|c22:6 \
 							 p1:P1|p2:P1|c11:P1"
 )
