@@ -3900,18 +3900,6 @@ retry:
 	compute_effective_cpumask(&new_cpus, cs, parent);
 	nodes_and(new_mems, cs->mems_allowed, parent->effective_mems);
 
-	/*
-	 * In v2 mode an empty mems_allowed means "inherit the parent's
-	 * effective mems", which hotplug_update_tasks() applies anyway.
-	 * Do it before computing mems_updated, as update_nodemasks_hier()
-	 * does: otherwise an empty cpuset.mems always compares as changed,
-	 * and every CPU hotplug rebinds the mempolicy of every task
-	 * (cpuset_update_tasks_nodemask -> mpol_rebind_mm under mmap_lock)
-	 * although no memory node changed.
-	 */
-	if (is_in_v2_mode() && nodes_empty(new_mems))
-		new_mems = parent->effective_mems;
-
 	if (!tmp || !cs->partition_root_state)
 		goto update_tasks;
 
