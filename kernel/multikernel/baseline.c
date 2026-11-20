@@ -59,6 +59,11 @@ static int mk_baseline_parse_cpus(const void *fdt, int resources_node,
 			return -EINVAL;
 		}
 
+		if (mk_cpu_quarantined(cpu_id)) {
+			pr_warn("EO_multikernel: baseline CPU pool: CPU %u in quarantine, left out\n",
+				cpu_id);
+			continue;
+		}
 		set_bit(cpu_id, instance->cpus);
 		pr_debug("Baseline CPU pool: added physical CPU %u\n", cpu_id);
 	}

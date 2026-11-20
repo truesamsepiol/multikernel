@@ -286,6 +286,11 @@ int mk_instance_transfer_cpus(struct mk_instance *instance,
 	}
 
 	for_each_set_bit(phys_cpu, cpus, NR_CPUS) {
+		if (mk_cpu_quarantined(phys_cpu)) {
+			pr_err("CPU %u is in quarantine (cpu_quarantine)\n", phys_cpu);
+			unavailable++;
+			continue;
+		}
 		if (!test_bit(phys_cpu, root_instance->cpus)) {
 			pr_err("CPU %u not available in root instance pool\n", phys_cpu);
 			unavailable++;
@@ -370,6 +375,12 @@ int mk_instance_return_cpus(struct mk_instance *instance,
 	 */
 	for_each_set_bit(phys_cpu, cpus, NR_CPUS) {
 		clear_bit(phys_cpu, instance->cpus);
+		/* A CPU in quarantine stays offline, out of the pool */
+		if (mk_cpu_quarantined(phys_cpu)) {
+			pr_warn("EO_multikernel: CPU %u in quarantine, kept offline after instance %d (%s)\n",
+				phys_cpu, instance->id, instance->name);
+			continue;
+		}
 		set_bit(phys_cpu, root_instance->cpus);
 		//EO -> retrive: 2
 		logical_cpu = arch_cpu_from_physical_id(phys_cpu);

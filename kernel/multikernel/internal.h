@@ -108,3 +108,12 @@ void mk_reclaim_register(struct mk_reclaim_resource *res);
 /* cpureclaim.c */
 int multikernel_cpu_reclaim(unsigned int count, const char *policy_name);
 void multikernel_cpu_reclaim_show(struct seq_file *sf);
+
+/* quarantine.c */
+bool mk_cpu_quarantined(int phys_cpu);
+unsigned int mk_cpu_quarantined_in(const unsigned long *cpus);
+unsigned int mk_cpu_quarantine_count(void);
+int multikernel_cpu_quarantine(u32 phys_cpu, const char *reason);
+int multikernel_cpu_unquarantine(u32 phys_cpu);
+void multikernel_cpu_quarantine_show(struct seq_file *sf);
+void mk_quarantine_set_node(struct kernfs_node *kn);
