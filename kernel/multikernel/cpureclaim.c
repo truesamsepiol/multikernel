@@ -262,10 +262,13 @@ static void mk_cpu_reclaim_monitor(void)
 	mutex_unlock(&mk_cpu_reclaim_mutex);
 }
 
-/* An instance holds its CPUs */
+/* An instance holds its CPUs; those in quarantine never go to the host */
 static unsigned long mk_cpu_reclaim_amount(struct mk_instance *instance)
 {
-	return instance->cpus ? bitmap_weight(instance->cpus, NR_CPUS) : 0;
+	if (!instance->cpus)
+		return 0;
+	return bitmap_weight(instance->cpus, NR_CPUS) -
+	       mk_cpu_quarantined_in(instance->cpus);
 }
 
 static unsigned long mk_cpu_reclaim_shown(unsigned long cpus)
@@ -355,6 +358,8 @@ void multikernel_cpu_reclaim_show(struct seq_file *sf)
 	mk_reclaim_victims_show(&mk_cpu_reclaim_res, sf);
 	seq_printf(sf, "pool: %u CPUs, instances %u, free %u\n",
 		   u.pool, u.instances, u.free);
+	seq_printf(sf, "quarantine: %u CPUs (cpu_quarantine)\n",
+		   mk_cpu_quarantine_count());
 	seq_printf(sf, "monitor period: %u ms\n", mk_reclaim_interval());
 	seq_puts(sf, "policies:");
 	mk_reclaim_policies_show(sf);

@@ -987,7 +987,9 @@ int mk_send_cpu_remove(int instance_id, u32 cpu_id)
 		return ret;
 
 	clear_bit(cpu_id, target_instance->cpus);
-	set_bit(cpu_id, root_instance->cpus);
+	/* A CPU in quarantine stays offline, out of the pool */
+	if (!mk_cpu_quarantined(cpu_id))
+		set_bit(cpu_id, root_instance->cpus);
 
 	return 0;
 }

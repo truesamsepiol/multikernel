@@ -257,6 +257,47 @@ static const struct kernfs_ops mk_cpu_reclaim_ops = {
 	.write = cpu_reclaim_write,
 };
 
+/*
+ * Root-level cpu_quarantine attribute - CPUs kept offline after a failed
+ * test. Write "<apic_id> [reason]" to put a CPU in quarantine,
+ * "-<apic_id>" to lift it.
+ */
+static int cpu_quarantine_seq_show(struct seq_file *sf, void *v)
+{
+	multikernel_cpu_quarantine_show(sf);
+	return 0;
+}
+
+static ssize_t cpu_quarantine_write(struct kernfs_open_file *of, char *buf,
+				    size_t count, loff_t off)
+{
+	char *str = strim(buf), *reason;
+	bool lift = false;
+	u32 cpu;
+	int ret;
+
+	if (*str == '-') {
+		lift = true;
+		str++;
+	}
+	reason = strpbrk(str, " \t");
+	if (reason) {
+		*reason++ = '\0';
+		reason = skip_spaces(reason);
+	}
+	if (kstrtou32(str, 10, &cpu) || (lift && reason && *reason))
+		return -EINVAL;
+
+	ret = lift ? multikernel_cpu_unquarantine(cpu) :
+		     multikernel_cpu_quarantine(cpu, reason);
+	return ret ? ret : count;
+}
+
+static const struct kernfs_ops mk_cpu_quarantine_ops = {
+	.seq_show = cpu_quarantine_seq_show,
+	.write = cpu_quarantine_write,
+};
+
 /* Root-level flex_reclaim_interval_ms attribute - period of the reclaim monitor */
 static int flex_reclaim_interval_seq_show(struct seq_file *sf, void *v)
 {
@@ -809,6 +850,17 @@ int mk_kernfs_init(void)
 		return ret;
 	}
 	mk_reclaim_set_history_node(flex_reclaimed_kn);
+
+	struct kernfs_node *cpu_quarantine_kn = __kernfs_create_file(mk_root_kn, "cpu_quarantine", 0644,
+								     GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, 0,
+								     &mk_cpu_quarantine_ops, NULL, NULL, NULL);
+	if (IS_ERR(cpu_quarantine_kn)) {
+		ret = PTR_ERR(cpu_quarantine_kn);
+		pr_err("Failed to create root cpu_quarantine file: %d\n", ret);
+		kernfs_destroy_root(mk_kernfs_root);
+		return ret;
+	}
+	mk_quarantine_set_node(cpu_quarantine_kn);
 
 	/* Register the filesystem */
 	ret = register_filesystem(&mk_fs_type);
