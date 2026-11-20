@@ -127,6 +127,8 @@ int native_kick_ap(unsigned int cpu, struct task_struct *tidle);
 struct kimage;
 int multikernel_kick_ap(unsigned int cpu, struct kimage *image);
 void multikernel_send_init(u32 phys_apicid);
+void mk_instance_register_cpus(void);
+bool mk_instance_cpus_from_dtb(void);
 int native_cpu_disable(void);
 void __noreturn hlt_play_dead(void);
 void __noreturn native_play_dead(void);

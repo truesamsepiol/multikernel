@@ -1276,6 +1276,18 @@ static int __init __apic_intr_mode_select(void)
 	}
 #endif
 
+	/*
+	 * A multikernel instance has no MADT and no MP table: its CPUs come
+	 * from its DTB (mk_instance_register_cpus(), which sets
+	 * smp_found_config). It has no I/O APIC: keep the virtual wire setup
+	 * it always had, now with SMP.
+	 */
+	if (mk_instance_cpus_from_dtb()) {
+		disable_ioapic_support();
+		pr_info("APIC: multikernel instance, CPUs from its DTB\n");
+		return APIC_VIRTUAL_WIRE;
+	}
+
 	/* Check MP table or ACPI MADT configuration */
 	if (!smp_found_config) {
 		disable_ioapic_support();

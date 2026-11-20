@@ -92,6 +92,7 @@
 #include <asm/e820/api.h>
 #include <linux/kexec_handover.h>
 #include <linux/multikernel.h>
+#include <linux/libfdt.h>
 #include <asm/spec-ctrl.h>
 
 /* representing HT siblings of each logical CPU */
@@ -1209,6 +1210,78 @@ static int __init configure_trampolines_bsp(void)
 }
 
 arch_initcall(configure_trampolines_bsp);
+
+/*
+ * Multikernel instance: declare the CPUs of its DTB.
+ *
+ * An instance boots with acpi=off and finds neither a MADT nor an MP table,
+ * so x86 only knew its boot APIC: nr_cpu_ids was fixed to 1 in setup_arch()
+ * and SMP was disabled, long before the DTB was read (mk_kho_restore_cpus(),
+ * an early_initcall). Its other CPUs (e.g. the SMT sibling) stayed offline,
+ * used by nobody. Like Jailhouse does for its cells (jailhouse.c), register
+ * the APICs listed in the DTB here, after the boot APIC is known
+ * (init_apic_mappings()) and before topology_init_possible_cpus().
+ *
+ * The warm reset vector is turned off: it writes the CMOS shutdown code and
+ * the BIOS data area at 0x467, which all kernels of the machine share. CPUs
+ * with an integrated APIC start with INIT + STARTUP IPI and do not need it.
+ */
+static bool mk_cpus_from_dtb __ro_after_init;
+
+/* True when this instance took its CPUs from its DTB (it has no I/O APIC) */
+bool mk_instance_cpus_from_dtb(void)
+{
+	return mk_cpus_from_dtb;
+}
+
+void __init mk_instance_register_cpus(void)
+{
+	const struct fdt_header *h;
+	const void *fdt, *dtb;
+	const fdt32_t *cpus;
+	phys_addr_t phys;
+	int node, dlen, len, i;
+	u32 size;
+
+	if (!mk_kho_is_spawned())
+		return;
+	if (smp_found_config || acpi_lapic) {
+		pr_warn("multikernel instance: firmware CPU tables found (ACPI or MP), CPUs of the DTB not used\n");
+		return;
+	}
+	phys = kho_get_fdt_phys();
+	h = early_memremap(phys, sizeof(*h));
+	if (!h)
+		return;
+	size = fdt_totalsize(h);
+	early_memunmap((void *)h, sizeof(*h));
+	fdt = early_memremap(phys, size);
+	if (!fdt)
+		return;
+
+	node = fdt_subnode_offset(fdt, 0, "multikernel");
+	dtb = node < 0 ? NULL : fdt_getprop(fdt, node, "dtb-data", &dlen);
+	/* instance DTB: root = the instance, CPUs in its "resources" node (dts.c) */
+	node = (!dtb || fdt_check_header(dtb)) ? -1 : fdt_subnode_offset(dtb, 0, "resources");
+	cpus = node < 0 ? NULL : fdt_getprop(dtb, node, "cpus", &len);
+	if (!cpus || len < (int)sizeof(*cpus)) {
+		pr_warn("multikernel instance: no CPU list in the DTB, booting with the boot CPU only\n");
+		goto out;
+	}
+	/* booted on a non-BSP CPU like kdump, but the real BSP stays with the host */
+	topology_real_bsp_elsewhere();
+	for (i = 0; i < len / (int)sizeof(*cpus); i++)
+		topology_register_apic(fdt32_to_cpu(cpus[i]), CPU_ACPIID_INVALID, true);
+	/* as Jailhouse and the x86 device tree path do: SMP configuration found */
+	smp_found_config = 1;
+	mk_cpus_from_dtb = true;
+	x86_platform.legacy.warm_reset = 0;
+	pr_info("multikernel instance: %d CPUs from the DTB (APIC IDs %u..%u), warm reset vector off\n",
+		len / (int)sizeof(*cpus), fdt32_to_cpu(cpus[0]),
+		fdt32_to_cpu(cpus[len / sizeof(*cpus) - 1]));
+out:
+	early_memunmap((void *)fdt, size);
+}
 
 /*
  * Low-memory windows for multikernel instances.

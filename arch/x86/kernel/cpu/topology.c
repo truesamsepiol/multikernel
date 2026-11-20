@@ -296,6 +296,23 @@ void __init topology_register_apic(u32 apic_id, u32 acpi_id, bool present)
 }
 
 /**
+ * topology_real_bsp_elsewhere - the real BSP is not among the CPUs to register
+ *
+ * A multikernel instance boots on a CPU without the APICBASE BSP bit, like a
+ * kdump kernel, so check_for_real_bsp() would limit it to one CPU, to never
+ * send INIT to the real BSP. The instance's CPU list comes from the host, and
+ * the host's boot CPU (the real BSP) cannot leave the host
+ * (arch_cpu_is_hotpluggable(0) is false), so the list never includes it:
+ * take the boot APIC as the BSP for the enumeration, as when the BSP bit is
+ * set. Call before registering the listed APICs.
+ */
+void __init topology_real_bsp_elsewhere(void)
+{
+	if (topo_info.real_bsp_apic_id == BAD_APICID)
+		topo_info.real_bsp_apic_id = topo_info.boot_cpu_apic_id;
+}
+
+/**
  * topology_register_boot_apic - Register the boot CPU APIC
  * @apic_id:	The APIC ID to set up
  *

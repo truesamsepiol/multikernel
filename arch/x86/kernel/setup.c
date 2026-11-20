@@ -1246,6 +1246,9 @@ void __init setup_arch(char **cmdline_p)
 	/* Last opportunity to detect and map the local APIC */
 	init_apic_mappings();
 
+	/* Multikernel instance: its CPUs come from its DTB (no MADT, no MP table) */
+	mk_instance_register_cpus();
+
 	topology_init_possible_cpus();
 
 	init_cpu_to_node();

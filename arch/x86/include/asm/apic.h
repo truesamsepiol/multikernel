@@ -178,6 +178,7 @@ extern void apic_send_IPI_allbutself(unsigned int vector);
 
 extern void topology_register_apic(u32 apic_id, u32 acpi_id, bool present);
 extern void topology_register_boot_apic(u32 apic_id);
+extern void topology_real_bsp_elsewhere(void);
 extern int topology_hotplug_apic(u32 apic_id, u32 acpi_id);
 extern void topology_hotunplug_apic(unsigned int cpu);
 extern void topology_apply_cmdline_limits_early(void);
