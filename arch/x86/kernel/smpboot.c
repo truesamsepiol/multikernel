@@ -89,6 +89,9 @@
 #include <asm/hw_irq.h>
 #include <asm/stackprotector.h>
 #include <asm/sev.h>
+#include <asm/e820/api.h>
+#include <linux/kexec_handover.h>
+#include <linux/multikernel.h>
 #include <asm/spec-ctrl.h>
 
 /* representing HT siblings of each logical CPU */
@@ -1105,6 +1108,9 @@ int multikernel_kick_ap(unsigned int cpu, struct kimage *image)
 
 	pr_info("++++++++++++++++++++=_---CPU UP  %u\n", cpu);
 
+	if (!x86_trampoline_bsp_base)
+		return -ENODEV;		/* an instance does not start instances */
+
 	if (apicid == BAD_APICID || !apic_id_valid(apicid)) {
 		pr_err("CPU %u has invalid APIC ID %x. Aborting bringup\n", cpu, apicid);
 		return -EINVAL;
@@ -1162,6 +1168,16 @@ void __init setup_trampolines_bsp(void)
         phys_addr_t mem;
         size_t size = PAGE_ALIGN(x86_trampoline_bsp_end - x86_trampoline_bsp_start);
 
+	/*
+	 * Only the host starts instances. An instance that copied this
+	 * trampoline would write into the host's low memory (it used to land
+	 * on the host's own BSP trampoline, top-down below 1 MB).
+	 */
+	if (mk_kho_is_spawned()) {
+		pr_info("multikernel instance: no BSP trampoline (only the host starts instances)\n");
+		return;
+	}
+
         /* Has to be in very low memory so we can execute real-mode AP code. */
         mem = memblock_phys_alloc_range(size, PAGE_SIZE, 0, 1<<20);
         if (!mem)
@@ -1185,11 +1201,138 @@ static int __init configure_trampolines_bsp(void)
 {
         size_t size = PAGE_ALIGN(x86_trampoline_bsp_end - x86_trampoline_bsp_start);
 
+	if (!x86_trampoline_bsp_base)
+		return 0;
+
         set_memory_x((unsigned long)x86_trampoline_bsp_base, size >> PAGE_SHIFT);
         return 0;
 }
 
 arch_initcall(configure_trampolines_bsp);
+
+/*
+ * Low-memory windows for multikernel instances.
+ *
+ * Every x86 kernel puts its real-mode trampoline (used to start its CPUs)
+ * below 1 MB. An instance used to receive all of the host's low RAM in its
+ * e820 map, so it placed its trampoline where the host keeps its own, and
+ * all kernels rewrote one shared trampoline before each CPU start, with no
+ * lock between kernels. Each instance now receives one private window: its
+ * trampoline can only go there, and no kernel writes into another's.
+ *
+ * Windows are carved top-down from the host's low RAM, above 64 KB (kept
+ * reserved by the kernel and the BIOS corruption check), around the host's
+ * real-mode and BSP trampolines. A window holds an instance's real-mode
+ * blob (28 KB for this kernel); instances do not copy the BSP trampoline.
+ */
+#define MK_LOWMEM_WINDOW	SZ_32K
+#define MK_LOWMEM_FLOOR		SZ_64K
+#define MK_LOWMEM_MAX		32
+
+static struct {
+	phys_addr_t base;
+	struct mk_instance *owner;
+} mk_lowmem[MK_LOWMEM_MAX];
+static int mk_lowmem_nr = -1;		/* -1: not built yet */
+static DEFINE_MUTEX(mk_lowmem_lock);
+
+static bool mk_lowmem_overlaps(phys_addr_t a, phys_addr_t b, phys_addr_t s, size_t n)
+{
+	return n && a < s + n && s < b;
+}
+
+static void mk_lowmem_build(void)
+{
+	phys_addr_t rm = 0, bsp = 0;
+	size_t rm_size = 0, bsp_size = 0;
+	int i;
+
+	if (real_mode_header) {
+		rm = __pa(real_mode_header);
+		rm_size = PAGE_ALIGN(real_mode_blob_end - real_mode_blob);
+	}
+	if (x86_trampoline_bsp_base) {
+		bsp = __pa(x86_trampoline_bsp_base);
+		bsp_size = PAGE_ALIGN(x86_trampoline_bsp_end - x86_trampoline_bsp_start);
+	}
+	if (rm_size > MK_LOWMEM_WINDOW)
+		pr_warn("multikernel: real-mode blob (%zu bytes) larger than a low-memory window (%u)\n",
+			rm_size, MK_LOWMEM_WINDOW);
+
+	mk_lowmem_nr = 0;
+	for (i = 0; i < e820_table->nr_entries; i++) {
+		struct e820_entry *e = &e820_table->entries[i];
+		phys_addr_t lo, hi;
+
+		if (e->type != E820_TYPE_RAM || e->addr >= SZ_1M)
+			continue;
+		lo = max_t(phys_addr_t, PAGE_ALIGN(e->addr), MK_LOWMEM_FLOOR);
+		hi = min_t(phys_addr_t, e->addr + e->size, SZ_1M) & PAGE_MASK;
+		while (hi >= lo + MK_LOWMEM_WINDOW && mk_lowmem_nr < MK_LOWMEM_MAX) {
+			phys_addr_t b = hi - MK_LOWMEM_WINDOW;
+
+			if (mk_lowmem_overlaps(b, hi, rm, rm_size)) {
+				hi = rm;
+				continue;
+			}
+			if (mk_lowmem_overlaps(b, hi, bsp, bsp_size)) {
+				hi = bsp;
+				continue;
+			}
+			mk_lowmem[mk_lowmem_nr].base = b;
+			mk_lowmem[mk_lowmem_nr++].owner = NULL;
+			hi = b;
+		}
+	}
+	pr_info("multikernel: %d low-memory windows of %u KB for instance trampolines (host real mode at %pa, %zu bytes; BSP trampoline at %pa, %zu bytes)\n",
+		mk_lowmem_nr, MK_LOWMEM_WINDOW >> 10, &rm, rm_size, &bsp, bsp_size);
+}
+
+int mk_arch_lowmem_window_get(struct mk_instance *instance)
+{
+	int i, ret = -ENOSPC;
+
+	if (instance->lowmem_size)
+		return 0;			/* kept across unload/load */
+
+	mutex_lock(&mk_lowmem_lock);
+	if (mk_lowmem_nr < 0)
+		mk_lowmem_build();
+	for (i = 0; i < mk_lowmem_nr; i++) {
+		phys_addr_t end;
+
+		if (mk_lowmem[i].owner)
+			continue;
+		mk_lowmem[i].owner = instance;
+		instance->lowmem_base = mk_lowmem[i].base;
+		instance->lowmem_size = MK_LOWMEM_WINDOW;
+		end = instance->lowmem_base + MK_LOWMEM_WINDOW - 1;
+		pr_info("multikernel: instance %d (%s): low-memory window [mem %pa-%pa]\n",
+			instance->id, instance->name, &instance->lowmem_base, &end);
+		ret = 0;
+		break;
+	}
+	mutex_unlock(&mk_lowmem_lock);
+	if (ret)
+		pr_err("multikernel: instance %d (%s): no free low-memory window (%d windows, all in use)\n",
+		       instance->id, instance->name, mk_lowmem_nr);
+	return ret;
+}
+
+void mk_arch_lowmem_window_put(struct mk_instance *instance)
+{
+	int i;
+
+	if (!instance->lowmem_size)
+		return;
+	mutex_lock(&mk_lowmem_lock);
+	for (i = 0; i < mk_lowmem_nr; i++)
+		if (mk_lowmem[i].owner == instance)
+			mk_lowmem[i].owner = NULL;
+	mutex_unlock(&mk_lowmem_lock);
+	instance->lowmem_base = 0;
+	instance->lowmem_size = 0;
+}
 
 int native_kick_ap(unsigned int cpu, struct task_struct *tidle)
 {

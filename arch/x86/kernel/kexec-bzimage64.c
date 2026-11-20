@@ -124,38 +124,24 @@ static int setup_e820_entries_multikernel(struct kimage *image, struct boot_para
 	struct mk_instance *instance = image->mk_instance;
 	struct mk_memory_region *region;
 	unsigned int nr_e820_entries = 0;
-	int i;
+	int ret;
 
-	/* For multikernel spawn, the spawn kernel needs RAM in the first 1MB to allocate
-	 * its real-mode trampoline (see arch/x86/realmode/init.c reserve_real_mode()).
-	 *
-	 * We use e820_table (the kernel's modified e820 map) rather than
-	 * e820_table_kexec, so we automatically exclude regions the kernel has
-	 * reserved (like 0x0-0xFFF containing IVT/BDA).
+	/*
+	 * The spawned kernel needs RAM below 1 MB for its real-mode trampoline
+	 * (arch/x86/realmode/init.c, reserve_real_mode()). It used to receive
+	 * all of the host's low RAM, so its trampoline landed on the host's and
+	 * every kernel rewrote one shared trampoline. It now receives only its
+	 * own window (smpboot.c, mk_arch_lowmem_window_get()).
 	 */
-
-	for (i = 0; i < e820_table->nr_entries && nr_e820_entries < E820_MAX_ENTRIES_ZEROPAGE; i++) {
-		struct e820_entry *entry = &e820_table->entries[i];
-		u64 entry_end = entry->addr + entry->size;
-
-		if (entry->addr >= 0x100000)
-			continue;
-
-		if (entry->type != E820_TYPE_RAM)
-			continue;
-
-		params->e820_table[nr_e820_entries].addr = entry->addr;
-		params->e820_table[nr_e820_entries].size = entry->size;
-		params->e820_table[nr_e820_entries].type = entry->type;
-		/* Truncate if it extends beyond 1MB */
-		if (entry_end > 0x100000)
-			params->e820_table[nr_e820_entries].size = 0x100000 - entry->addr;
-
-		nr_e820_entries++;
-	}
-
-	pr_info("Set up multikernel e820 map with %d entries from first 1MB\n",
-		nr_e820_entries);
+	if (!instance)
+		return -EINVAL;
+	ret = mk_arch_lowmem_window_get(instance);
+	if (ret)
+		return ret;
+	params->e820_table[0].addr = instance->lowmem_base;
+	params->e820_table[0].size = instance->lowmem_size;
+	params->e820_table[0].type = E820_TYPE_RAM;
+	nr_e820_entries = 1;
 
 	if (instance && !list_empty(&instance->memory_regions)) {
 		list_for_each_entry(region, &instance->memory_regions, list) {

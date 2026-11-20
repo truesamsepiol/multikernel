@@ -118,6 +118,16 @@ cleanup:
 	instance->pci_devices_valid = false;
 }
 
+/* Default for architectures without a low-memory trampoline window */
+int __weak mk_arch_lowmem_window_get(struct mk_instance *instance)
+{
+	return 0;
+}
+
+void __weak mk_arch_lowmem_window_put(struct mk_instance *instance)
+{
+}
+
 static void mk_instance_release(struct kref *kref)
 {
 	struct mk_instance *instance = container_of(kref, struct mk_instance, refcount);
@@ -128,6 +138,7 @@ static void mk_instance_release(struct kref *kref)
 	mk_instance_return_all_cpus(instance); 
 	mk_instance_return_pci_devices(instance);
 	mk_instance_free_memory(instance);
+	mk_arch_lowmem_window_put(instance);
 
 	kfree(instance->cpus);
 	kfree(instance->dtb_data);

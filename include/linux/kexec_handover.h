@@ -70,6 +70,7 @@ struct kimage;
 void kho_populate(phys_addr_t fdt_phys, u64 fdt_len, phys_addr_t scratch_phys,
 		  u64 scratch_len);
 void mk_kho_populate(phys_addr_t fdt_phys, u64 fdt_len);
+bool mk_kho_is_spawned(void);
 
 /* Multikernel kexec finalization */
 int mk_kexec_finalize(struct kimage *target_image);
@@ -156,6 +157,11 @@ static inline void kho_populate(phys_addr_t fdt_phys, u64 fdt_len,
 
 static inline void mk_kho_populate(phys_addr_t fdt_phys, u64 fdt_len)
 {
+}
+
+static inline bool mk_kho_is_spawned(void)
+{
+	return false;
 }
 
 static inline int mk_kexec_register_notifier(struct notifier_block *nb)

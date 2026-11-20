@@ -482,6 +482,13 @@ struct mk_instance {
 	/* Kexec integration */
 	struct kimage *kimage;          /* Associated kimage object */
 
+	/*
+	 * Private window below 1 MB (x86): the only low RAM the instance sees,
+	 * where it places its real-mode trampoline. 0 = none assigned yet.
+	 */
+	phys_addr_t lowmem_base;
+	size_t lowmem_size;
+
 	/* Sysfs representation */
 	struct kernfs_node *kn;            /* Kernfs node for this instance */
 
@@ -494,6 +501,10 @@ struct mk_instance {
 	// EO -> stdout_path
 	char *stdout_path;
 };
+
+/* Low-memory window of an instance (arch code; no-op where not needed) */
+int mk_arch_lowmem_window_get(struct mk_instance *instance);
+void mk_arch_lowmem_window_put(struct mk_instance *instance);
 
 /**
  * Device Tree Parsing Functions

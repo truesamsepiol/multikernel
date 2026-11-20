@@ -1608,6 +1608,19 @@ void __init kho_memory_init(void)
 	}
 }
 
+/* True when this kernel is a multikernel instance (spawned by a host). */
+static bool mk_kho_spawned;
+
+/**
+ * mk_kho_is_spawned() - is this kernel a multikernel instance?
+ *
+ * Valid once setup_arch() has parsed the setup_data (mk_kho_populate()).
+ */
+bool mk_kho_is_spawned(void)
+{
+	return mk_kho_spawned;
+}
+
 /**
  * mk_kho_populate() - Populate multikernel KHO data during early boot
  * @fdt_phys: Physical address of the multikernel FDT
@@ -1647,6 +1660,7 @@ void __init mk_kho_populate(phys_addr_t fdt_phys, u64 fdt_len)
 
 	kho_in.fdt_phys = fdt_phys;
 	kho_in.scratch_phys = 0;
+	mk_kho_spawned = true;
 
 	pr_info("Multikernel KHO: successfully populated FDT data\n");
 
