@@ -119,6 +119,9 @@ static idtentry_t sysvec_table[NR_SYSTEM_VECTORS] __ro_after_init = {
 	SYSVEC(POSTED_INTR_NESTED_VECTOR,	kvm_posted_intr_nested_ipi),
 
 	SYSVEC(POSTED_MSI_NOTIFICATION_VECTOR,	posted_msi_notification),
+#ifdef CONFIG_MULTIKERNEL
+	SYSVEC(MULTIKERNEL_VECTOR,		multikernel),
+#endif
 };
 
 static bool fred_setup_done __initdata;

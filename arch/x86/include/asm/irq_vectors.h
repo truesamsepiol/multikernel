@@ -107,7 +107,18 @@
 #define NR_VECTORS			 256
 
 #ifdef CONFIG_X86_LOCAL_APIC
+#ifdef CONFIG_MULTIKERNEL
+/*
+ * MULTIKERNEL_VECTOR must be a system vector. Below FIRST_SYSTEM_VECTOR it
+ * counts as a device vector for the FRED dispatch (fred_extint()), which KVM
+ * also uses on CPUs without FRED (handle_external_interrupt_irqoff()): an
+ * inter-kernel IPI received while the host CPU ran a guest went to
+ * common_interrupt(), "No irq handler for 0.234", and the message was lost.
+ */
+#define FIRST_SYSTEM_VECTOR		MULTIKERNEL_VECTOR
+#else
 #define FIRST_SYSTEM_VECTOR		POSTED_MSI_NOTIFICATION_VECTOR
+#endif
 #else
 #define FIRST_SYSTEM_VECTOR		NR_VECTORS
 #endif
